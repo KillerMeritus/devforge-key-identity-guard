@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, StrictInt
 import uvicorn
 
 from kig_core.attestation import attest
-from kig_core.archive import ArchiveConflict, ArchiveDenied, ArchiveUnavailable
+from kig_core.archive import ArchiveConflict, ArchiveDenied, ArchiveUnavailable, identifier
 from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
 from kig_core.witness import RevocationWitness
@@ -24,7 +24,7 @@ from kig_core.worker_archive import ArchivedGuard, MUTATIONS, PendingRecovery, R
 
 class Request(BaseModel):
     target: str = Field(max_length=128)
-    version: StrictInt | None = None
+    version: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
     approval: str | None = Field(default=None, max_length=128)
     public_key: str | None = Field(default=None, max_length=2048)
     challenge: str | None = Field(default=None, max_length=1024)
@@ -186,8 +186,11 @@ def worker(state, node, stop_at=None, *, archive=False):
         if action not in {"read", "revoke", "rotate", "enroll"}:
             return JSONResponse({"error": "unsupported_route"}, status_code=404)
         if archive:
-            if idempotency_key and len(idempotency_key) > 128:
-                return JSONResponse({"error": "invalid_request"}, status_code=422)
+            if idempotency_key is not None:
+                try:
+                    identifier(idempotency_key)
+                except ValueError:
+                    return JSONResponse({"error": "invalid_request"}, status_code=422)
             if action in MUTATIONS and not idempotency_key:
                 return JSONResponse({"error": "idempotency_key_required"}, status_code=400)
             try:

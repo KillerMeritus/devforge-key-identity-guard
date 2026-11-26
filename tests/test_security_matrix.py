@@ -100,6 +100,12 @@ class SecurityMatrix(unittest.TestCase):
                 self.assertEqual((status, invalid), (422, {"error": "invalid_request"}))
                 status, invalid, _ = call(port, "read", reader, {"target": [], "version": "1"})
                 self.assertEqual((status, invalid), (422, {"error": "invalid_request"}))
+                status, invalid, _ = call(port, "rotate", reader, {"target": "brief", "version": 2**80},
+                                          idempotency_key="version-overflow")
+                self.assertEqual((status, invalid), (422, {"error": "invalid_request"}))
+                if archive:
+                    status, invalid, _ = call(port, "rotate", reader, {"target": "brief"}, idempotency_key="space key")
+                    self.assertEqual((status, invalid), (422, {"error": "invalid_request"}))
                 with closing(sqlite3.connect(guard.path)) as db:
                     rows = db.execute("SELECT event FROM audit").fetchall()
                 self.assertEqual(len(rows), 1)
