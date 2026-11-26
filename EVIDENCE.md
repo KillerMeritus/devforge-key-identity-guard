@@ -78,3 +78,48 @@ The authenticated head detects missing records if the newer head survives.
 Restoring the entire archive and its head to a consistent older copy remains
 outside the isolated guarantee. A pending operation stays pending after a
 process kill. It is never automatically aborted because a marker is absent.
+
+## Isolated archive review fixes
+
+- Producer grants bind node, subsystem, and allowed event kinds. The archive
+  derives receipt metadata from that grant. The separate application actor
+  is still an assertion by the producer until workers derive it from verified
+  credentials.
+- Event schema v2 records the authorization decision. A terminal receipt
+  records transaction outcome and delivery status separately. Retrieval
+  exposes lifecycle and whether a mutation was confirmed. Pending and
+  aborted events remain retrievable as attempts.
+- Receipts bind versioned, sorted affected-state projections. Authorized
+  rotations must cover the asset and approval. Initial projections are
+  authenticated. New intents for known entities must match their latest
+  retained projection. Workers still have to verify actual persisted rows
+  and commit markers before finalization. No worker integration is enabled.
+- The archive reports used and remaining record capacity and whether it
+  can accept an intent. At capacity, finalization and authorized historical
+  retrieval still work under the tested conditions. The 1,024-record limit
+  permits up to 512 operations at two records per operation. No pruning.
+
+| Command | Observed result |
+|---|---|
+| `python -m unittest discover -s tests -p test_archive.py -v` | 12 passed. New checks cover producer identity, authenticated initial projections, complete rotation projections, and pending/aborted historical status. |
+| `python -m unittest discover -s tests -v` | 26 passed, 1 skipped. The archive-enabled rollback gate is still pending. |
+| `python <toolkit>/validate.py --entry track4_service.py` | 22 PASS lines. |
+
+Run `PYTHONPATH=. python scripts/benchmark_archive.py` for the local capacity
+benchmark. Each level takes 12 samples per operation and five samples of an
+append plus finalize under a 50 ms competing SQLite writer lock. Sizes are
+on-disk SQLite sizes at the start of each level. Samples recorded zero
+verification failures. Timings are local and do not include worker I/O.
+
+| Start fill | Records | SQLite bytes | Verify P50/P95 ms | Append P50/P95 ms | Finalize P50/P95 ms | Contended P50/P95 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| 0% | 0 | 24576 | 0.073 / 0.225 | 0.325 / 0.545 | 0.338 / 1.238 | 54.899 / 55.273 |
+| 25% | 256 | 237568 | 3.700 / 3.950 | 4.111 / 6.564 | 4.056 / 4.223 | 62.539 / 69.247 |
+| 50% | 512 | 446464 | 7.320 / 9.421 | 7.704 / 11.629 | 7.702 / 8.922 | 71.096 / 73.717 |
+| ~90% | 920 | 778240 | 13.100 / 13.369 | 13.552 / 15.880 | 13.429 / 14.229 | 81.892 / 86.304 |
+
+Remaining release gates include event-specific producer schemas and detector
+source provenance, cross-process worker enforcement and row verification,
+historical access during quarantine, and live investigator grant lifecycle.
+The isolated schema change applies to freshly provisioned fixtures. There
+is no archive migration or full-archive rollback guarantee in this revision.

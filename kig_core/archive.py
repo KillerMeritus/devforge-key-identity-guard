@@ -27,6 +27,7 @@ class ArchiveDenied(PermissionError):
 GENESIS = "0" * 64
 MAX_BYTES = 8192
 MAX_RECORDS = 1024
+MAX_PROJECTIONS = 8
 KINDS = frozenset({
     "access_decision", "evidence_access", "enrolment", "revocation", "role_change",
     "grant_change", "approval_issue", "approval_consume", "rotation", "backup_verify",
@@ -67,12 +68,12 @@ KINDS_WITH_EVIDENCE = {"detector_alert"}
 
 
 def event_schema(value):
-    fields(value, "version event_id request_id principal node kind entity_id result reason received_ms source_ids")
-    if type(value["version"]) is not int or value["version"] != 1 or value["kind"] not in KINDS:
+    fields(value, "version event_id request_id actor node subsystem kind entity_id authorization reason received_ms source_ids")
+    if type(value["version"]) is not int or value["version"] != 2 or value["kind"] not in KINDS:
         raise ValueError("unsupported event schema or kind")
-    for name in ("event_id", "request_id", "principal", "node", "entity_id", "reason"):
+    for name in ("event_id", "request_id", "actor", "node", "subsystem", "entity_id", "reason"):
         identifier(value[name])
-    if value["result"] not in ("allow", "deny", "observed", "unavailable"):
+    if value["authorization"] not in ("allow", "deny", "observed", "unavailable"):
         raise ValueError("invalid event result")
     integer(value["received_ms"])
     sources = value["source_ids"]
@@ -84,22 +85,49 @@ def event_schema(value):
         raise ValueError("missing or duplicate evidence references")
 
 
-def outcome_schema(outcome, event):
-    fields(outcome, "basis entity_id before_version after_version before_digest after_digest")
+def projection_schema(projection):
+    fields(projection, "schema entities")
+    if type(projection["schema"]) is not int or projection["schema"] != 1:
+        raise ValueError("invalid projection version")
+    entities = projection["entities"]
+    if not isinstance(entities, list) or not 1 <= len(entities) <= MAX_PROJECTIONS:
+        raise ValueError("invalid projection size")
+    keys = []
+    for entity in entities:
+        fields(entity, "kind id version digest")
+        identifier(entity["kind"])
+        identifier(entity["id"])
+        integer(entity["version"])
+        digest(entity["digest"])
+        keys.append((entity["kind"], entity["id"]))
+    if keys != sorted(set(keys)):
+        raise ValueError("projections must be uniquely identified and ordered")
+    return keys
+
+
+def outcome_schema(outcome, pending):
+    fields(outcome, "basis before after delivery")
     if (outcome["basis"] not in ("verified_commit", "verified_noncommit")
-            or outcome["entity_id"] != event["entity_id"]):
-        raise ValueError("outcome must bind an explicit state and entity")
-    for name in ("before_version", "after_version"):
-        integer(outcome[name])
-    for name in ("before_digest", "after_digest"):
-        digest(outcome[name])
-    same_state = (outcome["before_version"], outcome["before_digest"]) == (
-        outcome["after_version"], outcome["after_digest"])
-    if outcome["basis"] == "verified_noncommit" and not same_state:
-        raise ValueError("abort cannot change state")
-    if (outcome["basis"] == "verified_commit" and event["kind"] in STATE_MUTATIONS
-            and event["result"] == "allow" and same_state):
-        raise ValueError("successful mutation must bind a state change")
+            or outcome["delivery"] not in ("unknown", "withheld")):
+        raise ValueError("invalid transaction or delivery outcome")
+    before, after = outcome["before"], outcome["after"]
+    if projection_schema(before) != projection_schema(after):
+        raise ArchiveConflict("outcome changed the covered entities")
+    if before != pending["expected"]:
+        raise ArchiveConflict("outcome pre-state disagrees with intent")
+    event = pending["event"]
+    if outcome["basis"] == "verified_noncommit":
+        if before != after or outcome["delivery"] != "withheld":
+            raise ValueError("abort must leave state unchanged and withhold response data")
+    elif event["kind"] in STATE_MUTATIONS and event["authorization"] == "allow":
+        if before == after:
+            raise ValueError("successful mutation must bind a state change")
+        if event["kind"] == "rotation" and any(
+            old == new for old, new in zip(before["entities"], after["entities"])
+        ):
+            raise ValueError("authorized rotation must change every covered entity")
+    elif before != after:
+        raise ValueError("non-mutation or denied intent cannot change projected state")
 
 
 def decode_event(raw):
@@ -131,12 +159,18 @@ class Archive:
     def mac(self, key, domain, value):
         return hmac.digest(key, domain + b"\0" + canonical([self.store_id, value]), "sha256").hex()
 
-    def provision(self, grants):
+    def provision(self, grants, *, initial):
         """Create a new archive exclusively. Never run from a request path."""
+        projection_schema(initial)
         prepared = []
         for token, grant in grants.items():
             token_digest = self.token_digest(token)
-            fields(grant, "principal role scopes expires_ms revoked")
+            if grant.get("role") == "producer":
+                fields(grant, "principal role scopes expires_ms revoked node subsystem")
+                identifier(grant["node"])
+                identifier(grant["subsystem"])
+            else:
+                fields(grant, "principal role scopes expires_ms revoked")
             identifier(grant["principal"])
             if grant["role"] not in ("producer", "investigator") or type(grant["revoked"]) is not bool:
                 raise ValueError("invalid role or status")
@@ -145,7 +179,8 @@ class Archive:
             if not isinstance(scopes, list) or not scopes or len(scopes) > 32:
                 raise ValueError("explicit scopes required")
             for scope in scopes:
-                identifier(scope)
+                if scope not in KINDS:
+                    raise ValueError("unknown archive scope")
             data = canonical(grant)
             prepared.append((token_digest, data, self.mac(
                 self.grant_key, b"archive-grant-v1", [token_digest, grant])))
@@ -153,6 +188,9 @@ class Archive:
         os.close(fd)
         with transaction(self.path) as db:
             db.execute("CREATE TABLE head(singleton INTEGER PRIMARY KEY CHECK(singleton=1), seq INTEGER, tag TEXT, proof TEXT)")
+            db.execute("CREATE TABLE initial(singleton INTEGER PRIMARY KEY CHECK(singleton=1), body BLOB, proof TEXT)")
+            db.execute("INSERT INTO initial VALUES(1,?,?)", (
+                canonical(initial), self.mac(self.receipt_key, b"archive-initial-v1", initial)))
             db.execute("CREATE TABLE records(seq INTEGER PRIMARY KEY, body BLOB, tag TEXT)")
             db.execute("CREATE TABLE grants(digest TEXT PRIMARY KEY, body BLOB, proof TEXT)")
             db.executemany("INSERT INTO grants VALUES(?,?,?)", prepared)
@@ -197,6 +235,14 @@ class Archive:
                 head = db.execute("SELECT seq,tag,proof FROM head WHERE singleton=1").fetchone()
                 if head is None or not hmac.compare_digest(head[2], self.head_proof(head[0], head[1])):
                     raise ArchiveUnavailable("invalid archive position")
+                row = db.execute("SELECT body,proof FROM initial WHERE singleton=1").fetchone()
+                if row is None:
+                    raise ArchiveUnavailable("missing initial projection")
+                initial = json.loads(row[0])
+                if row[0] != canonical(initial) or not hmac.compare_digest(
+                    row[1], self.mac(self.receipt_key, b"archive-initial-v1", initial)
+                ):
+                    raise ArchiveUnavailable("invalid initial projection")
                 records = []
                 previous = GENESIS
                 for seq, raw, tag in db.execute("SELECT seq,body,tag FROM records ORDER BY seq"):
@@ -211,12 +257,12 @@ class Archive:
                     previous = tag
                 if head[:2] != (len(records), previous):
                     raise ArchiveUnavailable("archive position disagrees with history")
-                yield db, records, previous
+                yield db, records, previous, initial
         except (sqlite3.Error, json.JSONDecodeError, UnicodeError, AttributeError, KeyError, TypeError, RecursionError) as error:
             raise ArchiveUnavailable("archive state unavailable") from error
 
     def _append(self, db, records, previous, **details):
-        body = {"version": 1, "store_id": self.store_id, "sequence": len(records) + 1,
+        body = {"version": 2, "store_id": self.store_id, "sequence": len(records) + 1,
                 "predecessor": previous, **details}
         sequence = body["sequence"]
         tag = self.mac(self.receipt_key, b"archive-record-v1", body)
@@ -226,12 +272,15 @@ class Archive:
         return {**body, "tag": tag}
 
     def position(self, token):
-        with self.verified(write=False) as (db, records, head):
+        with self.verified(write=False) as (db, records, head, initial):
             grant = self.authorize(db, token, "producer")
             outstanding = records[-1] if records and records[-1]["state"] == "PENDING" else None
             return {"store_id": self.store_id, "sequence": len(records), "tag": head,
                     "proof": self.head_proof(len(records), head),
                     "terminal_position": outstanding["predecessor"] if outstanding else head,
+                    "initial_projection": initial,
+                    "capacity": {"used": len(records), "remaining": MAX_RECORDS - len(records),
+                                 "can_accept_intent": outstanding is None and len(records) + 2 <= MAX_RECORDS},
                     "has_pending": outstanding is not None,
                     "pending": (outstanding if outstanding and
                                 outstanding["producer"] == grant["principal"] and
@@ -242,13 +291,18 @@ class Archive:
         digest(predecessor)
         integer(deadline_ms)
         event = decode_event(raw_event)
-        fields(expected, "version digest")
-        integer(expected["version"])
-        digest(expected["digest"])
-        with self.verified(write=True) as (db, records, head):
+        keys = projection_schema(expected)
+        if event["entity_id"] not in {entity_id for _, entity_id in keys}:
+            raise ValueError("intent must cover the event entity")
+        if event["kind"] == "rotation" and event["authorization"] == "allow":
+            if (len(keys) != 2 or ("asset", event["entity_id"]) not in keys
+                    or {kind for kind, _ in keys} != {"asset", "approval"}):
+                raise ValueError("rotation must cover the asset and approval")
+        with self.verified(write=True) as (db, records, head, initial):
             grant = self.authorize(db, token, "producer")
             producer = grant["principal"]
-            if event["kind"] not in grant["scopes"]:
+            if (event["kind"] not in grant["scopes"] or event["node"] != grant["node"]
+                    or event["subsystem"] != grant["subsystem"]):
                 raise ArchiveDenied("event outside producer scope")
             for record in records:
                 if record["state"] != "PENDING" or record["producer"] != producer:
@@ -264,24 +318,32 @@ class Archive:
                 raise ArchiveConflict("unresolved pending operation")
             if predecessor != head or deadline_ms <= self.now():
                 raise ArchiveConflict("invalid predecessor or expired intent")
+            latest = {(entry["kind"], entry["id"]): entry for entry in initial["entities"]}
+            for record in records:
+                if record["state"] == "CONFIRMED":
+                    for entry in record["outcome"]["after"]["entities"]:
+                        latest[entry["kind"], entry["id"]] = entry
+            for entry in expected["entities"]:
+                known = latest.get((entry["kind"], entry["id"]))
+                if known is not None and known != entry:
+                    raise ArchiveConflict("intent disagrees with latest retained projection")
             if len(records) + 2 > MAX_RECORDS:
                 raise ArchiveUnavailable("archive capacity exhausted")
             return self._append(db, records, head, producer=producer, operation_id=operation_id,
-                               state="PENDING", event=event, deadline_ms=deadline_ms, expected=expected)
+                               state="PENDING", event=event, deadline_ms=deadline_ms, expected=expected,
+                                node=grant["node"], subsystem=grant["subsystem"])
 
     def finalize(self, token, pending_tag, outcome):
         digest(pending_tag)
-        with self.verified(write=True) as (db, records, head):
+        with self.verified(write=True) as (db, records, head, _initial):
             grant = self.authorize(db, token, "producer")
             pending = next((r for r in records if r["tag"] == pending_tag and r["state"] == "PENDING"), None)
             if pending is None:
                 raise ArchiveConflict("unknown pending receipt")
-            if pending["producer"] != grant["principal"] or pending["event"]["kind"] not in grant["scopes"]:
+            if (pending["producer"] != grant["principal"] or pending["event"]["kind"] not in grant["scopes"]
+                    or pending["node"] != grant["node"] or pending["subsystem"] != grant["subsystem"]):
                 raise ArchiveDenied("pending receipt outside producer scope")
-            outcome_schema(outcome, pending["event"])
-            expected = pending["expected"]
-            if (outcome["before_version"], outcome["before_digest"]) != (expected["version"], expected["digest"]):
-                raise ArchiveConflict("outcome pre-state disagrees with intent")
+            outcome_schema(outcome, pending)
             state = "CONFIRMED" if outcome["basis"] == "verified_commit" else "ABORTED"
             for record in records:
                 if record.get("pending_tag") == pending_tag:
@@ -292,12 +354,13 @@ class Archive:
                 raise ArchiveConflict("pending receipt is not at the archive head")
             return self._append(db, records, head, producer=pending["producer"],
                                operation_id=pending["operation_id"], state=state,
-                               pending_tag=pending_tag, outcome=outcome)
+                               pending_tag=pending_tag, outcome=outcome,
+                                node=grant["node"], subsystem=grant["subsystem"])
 
     def retrieve(self, token, producer, event_id):
         identifier(producer)
         identifier(event_id)
-        with self.verified(write=False) as (db, records, _):
+        with self.verified(write=False) as (db, records, _, _initial):
             grant = self.authorize(db, token, "investigator")
             for record in records:
                 event = record.get("event")
@@ -305,6 +368,10 @@ class Archive:
                     if event["kind"] not in grant["scopes"]:
                         raise ArchiveDenied("event outside investigator scope")
                     terminal = next((r for r in records if r.get("pending_tag") == record["tag"]), None)
+                    lifecycle = terminal["state"] if terminal else "PENDING"
                     return {"event_bytes": canonical(event), "intent_receipt": record,
-                            "terminal_receipt": terminal}
+                            "terminal_receipt": terminal, "lifecycle": lifecycle,
+                            "mutation_committed": (lifecycle == "CONFIRMED"
+                                                   and event["kind"] in STATE_MUTATIONS
+                                                   and event["authorization"] == "allow")}
             raise LookupError("unknown retained event")

@@ -32,7 +32,7 @@ try:
     record = archive.append_intent(config["token"], config["id"],
                                    base64.b64decode(config["event"]),
                                    predecessor=GENESIS, deadline_ms=config["deadline"],
-                                   expected={"version": 1, "digest": "a" * 64})
+                                   expected=config["projection"])
 except ArchiveConflict:
     print("conflict", flush=True)
 else:
@@ -54,30 +54,35 @@ class ArchiveTest(unittest.TestCase):
         self.deadline = self.archive.now() + 60_000
         investigator = dict(principal="investigator", role="investigator", scopes=["rotation"],
                             expires_ms=self.deadline, revoked=False)
+        self.projection = {"schema": 1, "entities": [
+            {"kind": "approval", "id": "approval-1", "version": 1, "digest": "b" * 64},
+            {"kind": "asset", "id": "brief", "version": 1, "digest": "a" * 64},
+        ]}
         self.archive.provision({
-            self.producer: {**investigator, "principal": "worker-A", "role": "producer"},
+            self.producer: {**investigator, "principal": "worker-A", "role": "producer",
+                            "node": "A", "subsystem": "worker"},
             self.investigator: investigator,
             self.expired: {**investigator, "expires_ms": 0},
             self.revoked: {**investigator, "revoked": True},
             self.narrow: {**investigator, "scopes": ["revocation"]},
-        })
-        self.event = dict(version=1, event_id="event-1", request_id="request-1",
-                          principal="fixture-user", node="A", kind="rotation", entity_id="brief",
-                          result="deny", reason="action_forbidden", received_ms=1, source_ids=[])
-        self.outcome = dict(basis="verified_commit", entity_id="brief", before_version=1,
-                            after_version=1, before_digest="a" * 64, after_digest="a" * 64)
+        }, initial=self.projection)
+        self.event = dict(version=2, event_id="event-1", request_id="request-1",
+                          actor="fixture-user", node="A", subsystem="worker", kind="rotation", entity_id="brief",
+                          authorization="deny", reason="action_forbidden", received_ms=1, source_ids=[])
+        self.outcome = dict(basis="verified_commit", before=self.projection,
+                            after=self.projection, delivery="unknown")
 
     def intent(self, event=None, operation="operation-1", predecessor=GENESIS):
         return self.archive.append_intent(self.producer, operation, canonical(event or self.event),
                                           predecessor=predecessor, deadline_ms=self.deadline,
-                                          expected={"version": 1, "digest": "a" * 64})
+                                          expected=self.projection)
 
     def test_canonical_event_and_scoped_historical_evidence(self):
         raw = canonical(self.event)
-        self.assertEqual(raw, b'{"entity_id":"brief","event_id":"event-1","kind":"rotation",'
-                         b'"node":"A","principal":"fixture-user","reason":"action_forbidden",'
-                         b'"received_ms":1,"request_id":"request-1","result":"deny",'
-                         b'"source_ids":[],"version":1}')
+        self.assertEqual(raw, b'{"actor":"fixture-user","authorization":"deny","entity_id":"brief",'
+                         b'"event_id":"event-1","kind":"rotation","node":"A",'
+                         b'"reason":"action_forbidden","received_ms":1,"request_id":"request-1",'
+                         b'"source_ids":[],"subsystem":"worker","version":2}')
         pending = self.intent()
         confirmed = self.archive.finalize(self.producer, pending["tag"], self.outcome)
         self.assertEqual((pending["state"], confirmed["state"]), ("PENDING", "CONFIRMED"))
@@ -106,8 +111,8 @@ class ArchiveTest(unittest.TestCase):
                                   {**self.outcome, "basis": "verified_noncommit", "after_version": 2})
         with self.assertRaises(ArchiveConflict):
             self.archive.finalize(self.producer, pending["tag"],
-                                  {**self.outcome, "before_digest": "b" * 64})
-        abort = {**self.outcome, "basis": "verified_noncommit"}
+                                  {**self.outcome, "before": self.changed_projection()})
+        abort = {**self.outcome, "basis": "verified_noncommit", "delivery": "withheld"}
         terminal = self.archive.finalize(self.producer, pending["tag"], abort)
         self.assertEqual(terminal["state"], "ABORTED")
         self.assertEqual(self.archive.finalize(self.producer, pending["tag"], abort), terminal)
@@ -120,7 +125,7 @@ class ArchiveTest(unittest.TestCase):
 
     def test_schema_rejects_noncanonical_or_extra_data(self):
         raw = canonical(self.event)
-        for invalid in (b" " + raw, raw.replace(b'"version":1', b'"version":1,"version":1'),
+        for invalid in (b" " + raw, raw.replace(b'"version":2', b'"version":2,"version":2'),
                         canonical({**self.event, "received_ms": True}),
                         canonical({**self.event, "received_ms": 1.5}),
                         canonical({**self.event, "plaintext": "excluded"}),
@@ -128,12 +133,12 @@ class ArchiveTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.archive.append_intent(self.producer, "op", invalid, predecessor=GENESIS,
                                            deadline_ms=self.deadline,
-                                           expected={"version": 1, "digest": "a" * 64})
+                                           expected=self.projection)
         self.assertEqual(self.archive.position(self.producer)["sequence"], 0)
 
     def test_pin_corruption_and_missing_archive_fail_closed(self):
         with self.assertRaises(FileExistsError):
-            self.archive.provision({})
+            self.archive.provision({}, initial=self.projection)
         wrong = Archive(self.path, "other-store", **self.keys)
         with self.assertRaises(ArchiveUnavailable):
             wrong.position(self.producer)
@@ -155,11 +160,14 @@ class ArchiveTest(unittest.TestCase):
                 self.intent({**self.event, "event_id": "next"}, operation="next",
                             predecessor=final["tag"])
             self.assertEqual(self.intent(), pending)
-            self.assertEqual(self.archive.position(self.producer)["sequence"], 2)
+            self.assertEqual(self.archive.position(self.producer)["capacity"],
+                             {"used": 2, "remaining": 0, "can_accept_intent": False})
+            self.assertEqual(self.archive.retrieve(self.investigator, "worker-A", "event-1")
+                             ["terminal_receipt"], final)
 
     def start_writer(self, name, *, gate=None, wait=False, operation=None, event=None):
         config = dict(path=str(self.path), receipt=self.keys["receipt_key"].hex(),
-                      grant=self.keys["grant_key"].hex(), id=operation or name,
+                      grant=self.keys["grant_key"].hex(), id=operation or name, projection=self.projection,
                       token=self.producer, deadline=self.deadline,
                       event=base64.b64encode(canonical(event or {**self.event, "event_id": name})).decode(),
                       gate=str(gate) if gate else None, wait=wait)
@@ -225,3 +233,61 @@ class ArchiveTest(unittest.TestCase):
         position = self.archive.position(self.producer)
         self.assertEqual(position["sequence"], 1)
         self.assertEqual(position["tag"], tags[0])
+
+
+    def changed_projection(self):
+        return {"schema": 1, "entities": [
+            {**entity, "version": 2, "digest": "c" * 64}
+            for entity in self.projection["entities"]
+        ]}
+
+    def test_identity_binding_rejects_cross_node_subsystem_and_kind(self):
+        for change in ({"node": "B"}, {"subsystem": "detector"}, {"kind": "revocation"}):
+            with self.subTest(change=change), self.assertRaises(ArchiveDenied):
+                self.intent({**self.event, **change})
+        self.assertEqual(self.archive.position(self.producer)["sequence"], 0)
+        record = self.intent()
+        self.assertEqual((record["producer"], record["node"], record["subsystem"]),
+                         ("worker-A", "A", "worker"))
+        self.assertEqual(record["event"]["actor"], "fixture-user")
+
+    def test_rotation_intent_and_abort_do_not_claim_completed_mutation(self):
+        pending = self.intent({**self.event, "authorization": "allow", "reason": "approved"})
+        retained = self.archive.retrieve(self.investigator, "worker-A", "event-1")
+        self.assertEqual(retained["lifecycle"], "PENDING")
+        self.assertFalse(retained["mutation_committed"])
+        self.archive.finalize(self.producer, pending["tag"], {
+            **self.outcome, "basis": "verified_noncommit", "delivery": "withheld",
+        })
+        retained = self.archive.retrieve(self.investigator, "worker-A", "event-1")
+        self.assertEqual(retained["lifecycle"], "ABORTED")
+        self.assertFalse(retained["mutation_committed"])
+
+    def test_rotation_requires_complete_composite_projection(self):
+        event = {**self.event, "authorization": "allow", "reason": "approved"}
+        partial = {"schema": 1, "entities": self.projection["entities"][1:]}
+        with self.assertRaises(ValueError):
+            self.archive.append_intent(self.producer, "operation-1", canonical(event),
+                                       predecessor=GENESIS, deadline_ms=self.deadline, expected=partial)
+        pending = self.intent(event)
+        valid = self.changed_projection()
+        for projection in (
+            partial,
+            {"schema": 1, "entities": [self.projection["entities"][0], valid["entities"][1]]},
+            {"schema": 1, "entities": [{**valid["entities"][0], "id": "other"}, valid["entities"][1]]},
+        ):
+            with self.assertRaises(ValueError):
+                self.archive.finalize(self.producer, pending["tag"], {**self.outcome, "after": projection})
+        final = self.archive.finalize(self.producer, pending["tag"], {**self.outcome, "after": valid})
+        with self.assertRaises(ArchiveConflict):
+            self.intent({**event, "event_id": "next"}, operation="next", predecessor=final["tag"])
+        retained = self.archive.retrieve(self.investigator, "worker-A", "event-1")
+        self.assertEqual(retained["lifecycle"], "CONFIRMED")
+        self.assertTrue(retained["mutation_committed"])
+
+    def test_initial_projection_is_authenticated(self):
+        self.assertEqual(self.archive.position(self.producer)["initial_projection"], self.projection)
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("UPDATE initial SET body=?", (canonical(self.changed_projection()),))
+        with self.assertRaises(ArchiveUnavailable):
+            self.archive.position(self.producer)
