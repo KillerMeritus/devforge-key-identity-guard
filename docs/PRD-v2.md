@@ -308,7 +308,130 @@ failure, and which test would falsify the claim. Review the scenario matrix
 before updating `main`. If verification time is short, ship the proven
 baseline and mark independent retention incomplete.
 
-## 12. Sources
+## 12. Conditional approval gate — Proof-Carrying Recovery
+
+**Planning status:** these requirements govern archive implementation. The
+review came from static inspection. Keep the current runtime as the fallback
+until the new gates pass on an exact candidate SHA.
+
+### Operation states and recovery
+
+The archive stores immutable records. `UNRESOLVED` is a recovery verdict,
+not a replacement for a durable record.
+
+| State | Required evidence | Deterministic recovery |
+|---|---|---|
+| PENDING | Authenticated intent durably appended. No terminal receipt exists. | Check the working transaction marker in verified current state. Confirm only when the marker matches the intent and committed change. Abort only on positive evidence that the transaction did not commit. Absence in a restored or unverified database is insufficient. Otherwise classify UNRESOLVED. |
+| CONFIRMED | Archive terminal receipt and working marker agree on the operation, outcome, and committed state binding. | Return the recorded non-sensitive outcome under fresh authorization. A missing or mismatched working marker after restore is UNRESOLVED for service availability. Keep the durable receipt. |
+| ABORTED | Terminal archive receipt records a verified noncommit, including a controlled rollback or a verified transaction/fencing record. | Never apply this operation again under the same ID. A newly authorized retry of the intent needs a new ID. A conflicting commit marker is UNRESOLVED. |
+| UNRESOLVED | Store unavailable, unverifiable, stale, or conflicting, or insufficient proof of commit/noncommit. | Withhold protected data and success acknowledgements. Preserve both histories. Permit authorized historical investigation independently. Reconcile against a trusted snapshot or independently verified commit/abort evidence. No automatic reset. |
+
+Allowed archive transitions are new → PENDING → one terminal state. Duplicate
+terminal writes with identical authenticated intent and outcome are no-ops.
+Unknown IDs and late delivery cannot supersede terminal records. The first
+prototype may resolve interrupted operations manually. Acceptance covers all
+crash boundaries, uncertain commit, lost terminal reply, conflict, and
+recovery with both stores available.
+
+### Canonical event and receipt contracts
+
+Use a versioned, allowlisted schema. Define event identity as a provisioned
+producer identity plus producer event ID. Every envelope carries schema
+version, store and producer IDs, event/operation/request IDs, authenticated
+principal reference where known, node, event kind, result, receipt timestamp,
+and sufficient correlation metadata. Define kind-specific fields and stable
+reason codes. Canonical bytes use UTF-8 and a project profile of deterministic
+JSON serialization with fixed schema keys, sorted object keys, compact
+encoding, and integers for time and sequence. Reject duplicate keys, unknown
+fields in signed payloads, floats, invalid UTF-8 and unbounded values. Publish
+golden canonical byte fixtures. RFC 8785 is a reference, and compatibility
+requires its own tests before claiming it.
+
+| Producer | Required retained events and bindings |
+|---|---|
+| Authorization and protected reads | Authorized and denied file/evidence decisions, asset and version, authenticated actor/device class, and reason. Record delivery acknowledgement separately when known. A decision to allow is not proof the recipient received bytes. |
+| Identity and policy administration | Enrolment, revocation, role and policy changes, approvals issued/denied/consumed, scope and policy version. Include approved target, action, and non-secret before/after references. |
+| Key and backup lifecycle | Rotation intent/outcome, version transitions, backup verification and restore decisions, sign-key provisioning/retirement, trust-root transitions. |
+| Evidence and archive operations | Investigator grants and denials, evidence retrieval/signing, initialization, checkpoint progress, conflicts, archive failures, and reconciliation outcomes. Protect against recursive logging by emitting archive bookkeeping through its own control log. |
+| Detector | Retain accepted redacted source envelopes independently of derived alerts. Alerts bind rule and rule version, source IDs, approval reference, corrected timing intervals, and interpretation. Retain conflict/late/invalid dispositions where safe. |
+
+Never store tokens, private keys, plaintext protected data, raw request bodies,
+or unbounded diagnostics. Use a non-secret, schema-typed redacted state
+projection. For mutations, bind the terminal receipt to the store, operation
+ID, authenticated caller scope, intent digest, schema version, predecessor,
+outcome, and **affected entity ID plus expected and resulting versions and
+state digests**. Examples include credential revocation status, role/grant
+version, approval consumption, and encrypted file/key version. Write a commit
+marker containing that binding in the same SQLite transaction as the mutation.
+Verify it against the confirmed receipt. Preserve this marker across normal
+retries. Audit position alone does not prove a working-state change.
+
+### Retries, ordering, and access
+
+- Scope idempotency keys to authenticated principal, endpoint, and operation
+  kind. Bind that key to canonical intent. Same key and different intent
+  returns conflict without effects. A retry always rechecks current
+  authorization. Protected reads never replay cached plaintext or revive an
+  old proof. Evaluate a fresh request and challenge against current policy,
+  with an independently auditable new attempt.
+- Enrolment retries cannot replay or recover a bearer secret. After a lost
+  response, disclose only the enrolment reference and state to the authorized
+  operator. To issue a replacement, first revoke the credential whose
+  delivery is uncertain via a new authorized operation. Test retries by
+  another identity and revocation during retries.
+- Deduplicate source IDs only when canonical bytes match. A differing
+  payload for the same producer/event ID creates a conflict record and
+  cannot replace source evidence or participate in automatic correlation.
+  Approval must match subject, action, resource/scope, version and valid
+  interval. Missing or ambiguous scope cannot authorize a protected change.
+- Retain source event and receipt time separately, plus corrected time and
+  uncertainty. Use bounded correlation keyed by actor/session/flow. Demo
+  defaults are 30 seconds of corrected event-time span and the existing
+  5-second arrival tolerance. Set explicit capacity and expiry limits; report
+  late and overflow outcomes. If corrected intervals overlap, record order
+  uncertain and omit any causal claim. Revalidate detector accuracy and
+  latency before retaining earlier performance claims.
+- Separate investigator identities from working-store operators. Provision
+  through the archive authority, grant read scope and expiry, verify grants
+  on every request, and support revocation/rotation within that authority.
+  Reject missing authority and revoked, expired or cross-scope credentials.
+  Log investigator actions independently, without granting append/delete.
+- The current file-key version policy is **logical retirement**. Old material
+  may remain in backups or be derivable from a retained root key. Claim
+  cryptographic destruction only if a separate design proves all relevant
+  material and recoverable copies are unavailable. This phase makes no
+  destruction claim.
+
+### Invariant traceability and time budget
+
+Code paths below are planned integration points. Add exact code and test
+links as each change lands.
+
+| Invariant | Planned code boundary | Acceptance test |
+|---|---|---|
+| IR‑1 No stale protected access | Worker guard and archive position verifier | Restore between revocation and a later event; both nodes refuse and investigator retrieves the event. |
+| IR‑2 A receipt proves the intended state change | Guard transaction marker and archive finalization | A valid receipt for the wrong target, version, or state digest fails; process kills cover each boundary. |
+| IR‑3 Retries do not disclose secrets or repeat mutations | Worker auth, idempotency state, issuance | Lost reply, revoked caller, divergent intent, and no read or enrolment secret replay. |
+| IR‑4 Retained history resolves provenance | Canonical event writer, detector ingestion, node attestation | Duplicate/conflicting IDs, bounded and ambiguous timing, source retrieval, wrong signing key and replayed challenge. |
+| IR‑5 Investigation is independently authorized | Archive investigator interface | Fresh, expired, revoked, and scoped credentials against stale working state. |
+| IR‑6 Baseline remains runnable | Judge adapter and demo harness | Public validator, local suite, pre/post crash UI runs and offline clean setup. |
+
+Timebox the design and test contract to the first 45 minutes available. Reserve
+**at least the original 105 minutes** for release verification, documentation,
+and rehearsal before committing to archive work. Use only remaining time for
+a narrow local prototype, with a stop/go checkpoint after the protocol and
+fixture pass. Defer the security-invariant dashboard until archived evidence
+and receipt verification are demonstrably correct. Keep the existing
+evidence UI as the fallback. Ship the verified baseline if the new milestone
+cannot meet its gates.
+
+For every increment record the commit SHA, commands and observed results,
+remaining risks, and PRD deviations. A dashboard may display measured
+invariant states as passed, failed, pending, or unavailable. It must never
+infer a pass from a missing run. Keep the archive local/offline and outside
+the organizer adapter contract.
+
+## 13. Sources
 
 - [Track 4 Toolkit and public validator](https://github.com/ScalerOpenSourceLabs/Track-4-Toolkit)
 - [Organizer adapter v1](https://github.com/ScalerOpenSourceLabs/Track-4-Toolkit/blob/main/docs/adapter-v1.md)
@@ -318,3 +441,6 @@ baseline and mark independent retention incomplete.
 - [SQLite Online Backup API](https://sqlite.org/backup.html)
 - [NIST SP 800-53 Rev. 5](https://doi.org/10.6028/NIST.SP.800-53r5), AU-5 and AU-9 as design references, with no compliance claim
 - [NIST FIPS 203](https://csrc.nist.gov/pubs/fips/203/final) and [FIPS 204](https://csrc.nist.gov/pubs/fips/204/final) for primitive roles
+
+- [RFC 8785, JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785.html)
+- [Making retries safe with idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)
