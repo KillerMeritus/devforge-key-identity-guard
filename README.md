@@ -64,7 +64,8 @@ processes use ephemeral ports to avoid collisions across fresh runs.
   checkout has no `practice/bad_backup.bin`. Backup verification does not
   implement whole-store restore or replace live keys.
 - The audit chain with authenticated head detects edits or tail deletion
-  when the head survives. A full snapshot rollback can restore both.
+  when the head survives. The external revocation checkpoint covers stale
+  file snapshots as described below.
 - The detector evaluates one event at a time within a finite replay. It
   emits confirmed approval and correlation findings once their evidence
   arrives. A generic access-review fallback waits for replay closure so
@@ -98,8 +99,32 @@ challenge, and request ID before reporting success.
 
 The demo uses separate signing keys on a shared host, with both seed files
 in the private demo state directory. It does not demonstrate process-level
-key isolation or whole-database rollback protection. ML-KEM-768 handles the
+key isolation. ML-KEM-768 handles the
 organizer's separate protected-read exchange.
+
+## Revocation survives old snapshots
+
+The demo provisions an authenticated checkpoint store in a separate SQLite
+file, outside the file database's restore boundary. It advances the
+checkpoint to the revocation's audit sequence and tag before acknowledging
+a revoke. In each worker, protected operations require that record to be
+present in their current database view. Missing, tampered, or mismatched
+checkpoints prevent file reads and signed evidence. HTTP 503 means the
+node cannot serve that state. It is distinct from an explicit revocation
+denial on a healthy node.
+
+Run `python -m unittest discover -s tests -p test_rollback.py -v` to restore
+a pre-revocation backup with the witness preserved and exercise both HTTP
+workers. The test restores the current database afterward, then confirms
+the teammate can read and the revoked laptop cannot.
+
+The witness is kept on the demo host. The guarantee covers snapshots older
+than the latest checkpointed revocation when the witness survives.
+Rollback of the witness itself, rotation-only rollback after that
+revocation, and automatic reconciliation are outside this milestone. An
+interrupted revocation can leave the checkpoint ahead of the file store.
+In that case the workers withhold protected operations pending trusted
+recovery.
 
 ## Submission status
 

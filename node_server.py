@@ -14,6 +14,7 @@ import uvicorn
 from kig_core.attestation import attest
 from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
+from kig_core.witness import RevocationWitness
 
 
 class Request(BaseModel):
@@ -44,7 +45,8 @@ def worker(state, node, stop_at=None):
                 time.sleep(60)
 
     keys = [(state / f"{name}.key").read_bytes() for name in ("audit", "storage", "backup")]
-    guard = Guard(state / "demo.sqlite", *keys, checkpoint=checkpoint)
+    witness = RevocationWitness(state / "witness" / "checkpoint.sqlite", keys[0])
+    guard = Guard(state / "demo.sqlite", *keys, checkpoint=checkpoint, witness=witness)
     api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     def token(header):

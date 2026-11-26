@@ -4,8 +4,8 @@ import sqlite3
 
 
 @contextmanager
-def transaction(path, *, write=True):
-    db = sqlite3.connect(path, isolation_level=None, timeout=5)
+def transaction(path, *, write=True, uri=False):
+    db = sqlite3.connect(path, isolation_level=None, timeout=5, uri=uri)
     try:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA synchronous=FULL")

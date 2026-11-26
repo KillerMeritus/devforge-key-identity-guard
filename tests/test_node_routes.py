@@ -10,6 +10,7 @@ from demo_cli import call, start
 from kig_core.attestation import verify_attestation
 from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
+from kig_core.witness import RevocationWitness
 
 
 class NodeRoutesTest(unittest.TestCase):
@@ -22,7 +23,10 @@ class NodeRoutesTest(unittest.TestCase):
             seed = secrets.token_bytes(32)
             (state / "attestation-A.key").write_bytes(seed)
             public = MLDSA65PrivateKey.from_seed_bytes(seed).public_key().public_bytes_raw()
-            guard = Guard(state / "demo.sqlite", *keys)
+            (state / "witness").mkdir(mode=0o700)
+            witness = RevocationWitness(state / "witness" / "checkpoint.sqlite", keys[0])
+            witness.provision()
+            guard = Guard(state / "demo.sqlite", *keys, witness=witness)
             admin = guard.enroll("operator", "admin")
             reader = guard.enroll("reader")
             port, _ = start(stack, state, "A", state / "worker.log")

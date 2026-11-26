@@ -1,5 +1,6 @@
 """Local defensive prototype. Two workers share a transactional authority."""
 import base64
+from contextlib import contextmanager
 import hashlib
 import hmac
 import json
@@ -16,14 +17,15 @@ from .db import enable_wal, transaction
 
 
 class Guard:
-    def __init__(self, path, audit_key, storage_key, backup_key=None, checkpoint=None):
+    def __init__(self, path, audit_key, storage_key, backup_key=None, checkpoint=None, *, witness=None):
         self.path = path
         self.audit_key = audit_key
         self.storage_key = storage_key
         self.backup_key = backup_key
+        self.witness = witness
         self.checkpoint = checkpoint or (lambda _: None)
         enable_wal(path)
-        with self.transaction() as db:
+        with transaction(self.path) as db:
             for ddl in (
                 "devices(token TEXT PRIMARY KEY, actor TEXT, role TEXT, revoked INTEGER DEFAULT 0)",
                 "files(id TEXT PRIMARY KEY, body BLOB, version INTEGER)",
@@ -34,8 +36,12 @@ class Guard:
             ):
                 db.execute("CREATE TABLE IF NOT EXISTS " + ddl)
 
+    @contextmanager
     def transaction(self, *, write=True):
-        return transaction(self.path, write=write)
+        with transaction(self.path, write=write) as db:
+            if self.witness is not None:
+                self.witness.check(db)
+            yield db
 
     def enroll(self, actor, role="reader"):
         """Trusted provisioning entry point."""
@@ -109,11 +115,15 @@ class Guard:
                 result = self.apply(db, actor, role, action, target, version,
                                     approval, public_key, challenge, prepared)
             result["request_id"] = secrets.token_hex(16)
-            self.record(db, dict(node=node, actor=actor, role=role, action=action,
+            sequence, tag = self.record(db, dict(node=node, actor=actor, role=role, action=action,
                                  target=target, timestamp=time.time(), allowed=result["allowed"],
                                  decision="allow" if result["allowed"] else "deny",
                                  reason=result["reason"], request_id=result["request_id"],
                                  version=result.get("version", version)))
+            if result["reason"] == "revoked" and self.witness is not None:
+                # Persist the independent checkpoint before acknowledging the revocation.
+                # A crash before the local commit then fails closed on the next request.
+                self.witness.advance(sequence, tag)
             rotated = result["reason"] == "version_rotated"
             if rotated:
                 self.checkpoint("pre")
@@ -140,6 +150,7 @@ class Guard:
         db.execute("INSERT INTO audit VALUES(?,?,?)", (index, event, tag))
         db.execute("INSERT OR REPLACE INTO audit_head VALUES(1,?,?,?)",
                    (index, tag, self.head_proof(index, tag)))
+        return index, tag
 
     def head_proof(self, index, tag):
         return hmac.digest(self.audit_key, f"head:{index}:{tag}".encode(), "sha256").hex()

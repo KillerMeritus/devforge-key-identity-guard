@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
 
 from kig_core.attestation import verify_attestation
 from kig_core.guard import Guard
+from kig_core.witness import RevocationWitness
 
 
 BODY = "Synthetic design brief №1\nInternal demo only".encode()
@@ -105,7 +106,10 @@ def run(phase):
         for name, key in key_files.items():
             with open(os.open(state / f"{name}.key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
                 handle.write(key)
-        guard = Guard(state / "demo.sqlite", *keys)
+        (state / "witness").mkdir(mode=0o700)
+        witness = RevocationWitness(state / "witness" / "checkpoint.sqlite", keys[0])
+        witness.provision()
+        guard = Guard(state / "demo.sqlite", *keys, witness=witness)
         operator = guard.enroll("operator", "admin")
         laptop, teammate = guard.enroll("owner"), guard.enroll("teammate")
         guard.seed_file("brief", BODY, "owner", "teammate")
