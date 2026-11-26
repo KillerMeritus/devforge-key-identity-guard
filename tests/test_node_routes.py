@@ -20,7 +20,7 @@ class NodeRoutesTest(unittest.TestCase):
             for name, key in zip(("audit", "storage", "backup"), keys):
                 (state / f"{name}.key").write_bytes(key)
             seed = secrets.token_bytes(32)
-            (state / "attestation.key").write_bytes(seed)
+            (state / "attestation-A.key").write_bytes(seed)
             public = MLDSA65PrivateKey.from_seed_bytes(seed).public_key().public_bytes_raw()
             guard = Guard(state / "demo.sqlite", *keys)
             admin = guard.enroll("operator", "admin")
@@ -48,7 +48,7 @@ class NodeRoutesTest(unittest.TestCase):
             self.assertEqual(status, 200)
 
             def verify(envelope, *, key=public, nonce=challenge, request_id=headers["X-Request-ID"]):
-                return verify_attestation(envelope, key, challenge=nonce, request_id=request_id)
+                return verify_attestation(envelope, key, node="A", challenge=nonce, request_id=request_id)
 
             self.assertTrue(verify(signed))
             self.assertFalse(verify(signed, nonce=secrets.token_hex(32)))
@@ -57,6 +57,15 @@ class NodeRoutesTest(unittest.TestCase):
             self.assertFalse(verify(signed, key=another_key))
             changed = {**signed, "event": {**signed["event"], "decision": "allow"}}
             self.assertFalse(verify(changed))
+            second = MLDSA65PrivateKey.generate()
+            (state / "attestation-B.key").write_bytes(second.private_bytes_raw())
+            port_b, _ = start(stack, state, "B", state / "worker-b.log")
+            self.assertEqual(call(port_b, attestation_route, admin, fields)[0], 409)
+            self.assertFalse(verify({**signed, "node": "B"}))
+            self.assertFalse(verify_attestation(
+                signed, second.public_key().public_bytes_raw(), node="B",
+                challenge=challenge, request_id=headers["X-Request-ID"],
+            ))
             with guard.transaction() as db:
                 db.execute("UPDATE audit SET event='{}' WHERE id=1")
             self.assertEqual(call(port, attestation_route, admin, fields)[0], 503)

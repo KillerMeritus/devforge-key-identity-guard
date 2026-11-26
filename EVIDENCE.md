@@ -21,8 +21,9 @@
 ## Post-quantum verification and access control
 
 Both crash scenarios request a signed revocation denial with a fresh
-challenge and verify it against the preconfigured ML-DSA-65 public key.
+challenge from each node and verify it against that node's pinned ML-DSA-65 key.
 The route test checks denied access for anonymous, reader, and revoked
 operator credentials, rejects signing from a corrupt audit chain, and
 checks verification failures for changed evidence, a wrong key, a wrong
-request ID, and a different challenge.
+request ID, a different challenge, or an incorrect node. It also verifies
+that Node B refuses to sign a record originating from Node A.

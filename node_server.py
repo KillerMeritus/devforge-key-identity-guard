@@ -91,12 +91,14 @@ def worker(state, node, stop_at=None):
         event = find_evidence(request_id, authorization)
         if isinstance(event, JSONResponse):
             return event
+        if event["node"] != node:
+            return JSONResponse({"error": "evidence_belongs_to_another_node"}, status_code=409)
         try:
-            seed = (state / "attestation.key").read_bytes()
+            seed = (state / f"attestation-{node}.key").read_bytes()
             key = MLDSA65PrivateKey.from_seed_bytes(seed)
         except (OSError, ValueError):
             return JSONResponse({"error": "attestation_unavailable"}, status_code=503)
-        return attest(key, request.challenge, event)
+        return attest(key, node, request.challenge, event)
 
     @api.post("/message")
     def message(authorization: str | None = Header(default=None)):

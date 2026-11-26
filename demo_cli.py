@@ -95,9 +95,14 @@ def run(phase):
     with tempfile.TemporaryDirectory(prefix="track4-demo-") as path, ExitStack() as stack:
         state = Path(path)
         keys = [secrets.token_bytes(32) for _ in range(3)]
-        signing_seed = secrets.token_bytes(32)
-        trusted_public_key = MLDSA65PrivateKey.from_seed_bytes(signing_seed).public_key().public_bytes_raw()
-        for name, key in zip(("audit", "storage", "backup", "attestation"), [*keys, signing_seed]):
+        signing_seeds = {node: secrets.token_bytes(32) for node in ("A", "B")}
+        trusted_public_keys = {
+            node: MLDSA65PrivateKey.from_seed_bytes(seed).public_key().public_bytes_raw()
+            for node, seed in signing_seeds.items()
+        }
+        key_files = dict(zip(("audit", "storage", "backup"), keys))
+        key_files.update({f"attestation-{node}": seed for node, seed in signing_seeds.items()})
+        for name, key in key_files.items():
             with open(os.open(state / f"{name}.key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
                 handle.write(key)
         guard = Guard(state / "demo.sqlite", *keys)
@@ -210,16 +215,17 @@ def run(phase):
             event(name, "Revocation survived restart", request_id=revoked_request_id)
             if phase == "post":
                 require(read(port, teammate, 1)[1]["reason"] == "wrong_version", "old version accepted")
-        challenge = secrets.token_hex(32)
-        route = f"evidence/{revoked_request_id}/attestation"
-        require(call(b, route, teammate, {"challenge": challenge})[0] == 403,
-                "reader obtained a signed audit record")
-        status, signed, _ = call(b, route, operator, {"challenge": challenge})
-        require(status == 200 and verify_attestation(
-            signed, trusted_public_key, challenge=challenge, request_id=revoked_request_id
-        ), "post-quantum attestation did not verify")
-        require(signed["event"]["reason"] == "revoked_device", "signed wrong decision")
-        event("Audit", "ML-DSA-65 revocation evidence verified", request_id=revoked_request_id)
+            challenge = secrets.token_hex(32)
+            route = f"evidence/{revoked_request_id}/attestation"
+            require(call(port, route, teammate, {"challenge": challenge})[0] == 403,
+                    "reader obtained a signed audit record")
+            status, signed, _ = call(port, route, operator, {"challenge": challenge})
+            require(status == 200 and verify_attestation(
+                signed, trusted_public_keys[name], node=name, challenge=challenge,
+                request_id=revoked_request_id
+            ), "post-quantum attestation did not verify")
+            require(signed["event"]["reason"] == "revoked_device", "signed wrong decision")
+            event(name, "ML-DSA-65 revocation evidence verified", request_id=revoked_request_id)
         evidence = guard.evidence(operator)
         commits = [row for row in evidence if row["reason"] == "version_rotated"]
         require(len(commits) == (phase == "post"), "unexpected number of committed rotation events")

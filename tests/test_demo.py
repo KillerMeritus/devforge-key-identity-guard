@@ -16,6 +16,9 @@ class DemoTest(unittest.TestCase):
                 result = run(phase)
                 self.assertEqual(result["active_version"], version)
                 self.assertTrue(result["audit_verified"])
+                self.assertEqual([entry["source"] for entry in result["timeline"]
+                                  if entry["label"] == "ML-DSA-65 revocation evidence verified"],
+                                 ["A", "B"])
                 self.assertEqual(result["continuity"]["prepared"]["reads"], 5)
                 self.assertEqual(result["continuity"]["prepared"]["errors"], 0)
                 if phase == "post":

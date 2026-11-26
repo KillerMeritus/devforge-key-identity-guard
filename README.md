@@ -88,19 +88,18 @@ processes use ephemeral ports to avoid collisions across fresh runs.
 
 ## Post-quantum audit verification
 
-The local demo provisions an ML-DSA-65 signing seed alongside its other
-private state. Its verifier pins the corresponding public key at setup.
-After recovery, it requests a signature over a recorded revocation denial
-and a fresh 32-byte challenge at
-`POST /evidence/{request_id}/attestation`. An active operator credential and
-an intact audit chain are required. The client verifies the signature,
-challenge, and requested event before reporting success in the timeline.
-No signing key or bearer credential is sent to the verifier.
+The local demo provisions a separate ML-DSA-65 signing seed for each
+worker and pins each public key to its node at setup. After recovery the
+client requests a fresh challenge-bound signature from each node on its
+own recorded revocation denial. The attestation route requires an active
+operator and an intact audit chain. A request to sign a different node's
+record returns HTTP 409. The verifier checks the expected node, pinned key,
+challenge, and request ID before reporting success.
 
-This signature authenticates the selected audit record to the pinned key.
-The two local workers share that key. It does not establish independent
-node identity or detect whole-database rollback. ML-KEM-768 still handles
-the separate organizer protected-read exchange.
+The demo uses separate signing keys on a shared host, with both seed files
+in the private demo state directory. It does not demonstrate process-level
+key isolation or whole-database rollback protection. ML-KEM-768 handles the
+organizer's separate protected-read exchange.
 
 ## Submission status
 
