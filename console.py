@@ -5,7 +5,8 @@ from pathlib import Path
 import sys
 from urllib.parse import urlsplit
 
-from demo_cli import run
+from demo_cli import ScenarioAssertion, run
+from console_scenarios import detector_replay, time_machine
 
 
 ORIGIN = "http://127.0.0.1:8080"
@@ -39,22 +40,26 @@ class Console(BaseHTTPRequestHandler):
         self.respond(200, (UI / filename).read_bytes(), content_type)
 
     def do_POST(self):
-        phases = {"/run/pre": "pre", "/run/post": "post"}
-        phase = phases.get(self.path)
+        routes = {"/run/pre": lambda: run("pre"), "/run/post": lambda: run("post"),
+                  "/run/detection": detector_replay, "/run/archive": time_machine}
+        scenario = routes.get(self.path)
         if (
             self.headers.get("Host") != urlsplit(ORIGIN).netloc
             or self.headers.get("Origin") != ORIGIN
             or self.headers.get("X-Recovery-Console") != "run"
             or self.headers.get("Content-Length") not in (None, "0")
-            or phase is None
+            or scenario is None
         ):
             self.respond(403, b'{"error":"forbidden"}')
             return
         try:
-            result = run(phase)
-        except (RuntimeError, OSError) as error:
-            print(f"Recovery scenario {phase} failed ({type(error).__name__}).", file=sys.stderr)
-            self.respond(500, b'{"error":"Scenario failed. Run demo_cli.py for diagnostics."}')
+            result = scenario()
+        except ScenarioAssertion as error:
+            self.respond(409, json.dumps({"error": str(error), "verification_failed": True}).encode())
+            return
+        except (RuntimeError, OSError, ValueError) as error:
+            print(f"Console scenario {self.path} failed ({type(error).__name__}).", file=sys.stderr)
+            self.respond(503, b'{"error":"Scenario unavailable. Check the console process log."}')
             return
         self.respond(200, json.dumps(result).encode())
 

@@ -1,4 +1,5 @@
 """Isolated local archive. Workers must verify committed rows before finalizing."""
+from datetime import datetime
 import hashlib
 import hmac
 import json
@@ -79,6 +80,7 @@ def event_schema(value):
     fields(value, names + (" approval_id" if rotation else "") + (" timing" if kind in TELEMETRY_KINDS else "")
            + (" credential_id" if "credential_id" in value else "")
            + (" resource_present" if kind == "access_decision" and "resource_present" in value else "")
+           + (" detector_context" if kind in TELEMETRY_KINDS and "detector_context" in value else "")
            + (" rule_id rule_version approval_ref" if kind == "detector_alert" else ""))
     if type(value["version"]) is not int or value["version"] != 2 or kind not in KINDS:
         raise ValueError("unsupported event schema or kind")
@@ -117,6 +119,60 @@ def event_schema(value):
         fields(timing, "corrected_ms uncertainty_ms")
         integer(timing["corrected_ms"])
         integer(timing["uncertainty_ms"])
+    if "detector_context" in value:
+        context = value["detector_context"]
+        if type(context) is not dict:
+            raise ValueError("invalid detector context")
+        if kind == "detector_source":
+            fields(context, "event_ms received_ms event_time_utc received_time_utc clock_offset_ms action outcome role role_before source_service target_service session_id correlation_id approval_id requested_scope")
+            for name in ("event_ms", "received_ms"):
+                integer(context[name])
+            for name in ("event_time_utc", "received_time_utc"):
+                stamp = context[name]
+                if not isinstance(stamp, str) or len(stamp) > 40 or datetime.fromisoformat(stamp).tzinfo is None:
+                    raise ValueError("invalid detector timestamp")
+            offset = context["clock_offset_ms"]
+            if type(offset) is not int or abs(offset) > 86_400_000:
+                raise ValueError("invalid detector clock offset")
+            for name in ("action", "outcome", "role", "source_service", "target_service",
+                         "session_id", "correlation_id"):
+                identifier(context[name])
+            scope = context["requested_scope"]
+            if type(scope) is not list or len(scope) > 32:
+                raise ValueError("invalid requested detector scope")
+            for service in scope:
+                identifier(service)
+            for name in ("approval_id", "role_before"):
+                if context[name] is not None:
+                    identifier(context[name])
+        else:
+            fields(context, "classification approval_status approval_digest approval")
+            if context["classification"] not in ("policy_violation", "investigate"):
+                raise ValueError("invalid detector classification")
+            if context["approval_status"] not in ("missing", "matches", "mismatch", "outside_scope"):
+                raise ValueError("invalid detector approval status")
+            approval = context["approval"]
+            proof = context["approval_digest"]
+            if approval is None:
+                if proof is not None or context["approval_status"] != "missing":
+                    raise ValueError("invalid missing approval context")
+            else:
+                fields(approval, "approval_id subject operation role scope valid_from_utc valid_until_utc")
+                for name in ("approval_id", "subject", "operation", "role"):
+                    identifier(approval[name])
+                for name in ("valid_from_utc", "valid_until_utc"):
+                    stamp = approval[name]
+                    if not isinstance(stamp, str) or len(stamp) > 40 or datetime.fromisoformat(stamp).tzinfo is None:
+                        raise ValueError("invalid detector approval timestamp")
+                scope = approval["scope"]
+                if type(scope) is not list or len(scope) > 32:
+                    raise ValueError("invalid detector approval scope")
+                for service in scope:
+                    identifier(service)
+                if (proof != hashlib.sha256(canonical(approval)).hexdigest()
+                        or approval["approval_id"] != value["approval_ref"]
+                        or context["approval_status"] == "missing"):
+                    raise ValueError("invalid detector approval provenance")
     if kind == "detector_alert":
         identifier(value["rule_id"])
         integer(value["rule_version"])
@@ -485,17 +541,52 @@ class Archive:
                 if known is not None and (known != entry or new_entity):
                     raise ArchiveConflict("intent disagrees with latest retained projection")
             if kind == "detector_alert":
-                confirmed = {record["pending_tag"] for record in records if record["state"] == "CONFIRMED"}
-                retained = {(record["producer"], record["event"]["event_id"]) for record in records
-                            if record["tag"] in confirmed and record["event"]["kind"] == "detector_source"}
-                if any((source["producer"], source["event_id"]) not in retained
-                       for source in event["source_ids"]):
-                    raise ArchiveConflict("alert references unavailable retained source evidence")
+                self.check_detector_sources(records, event)
             if len(records) + 2 > MAX_RECORDS:
                 raise ArchiveUnavailable("archive capacity exhausted")
             return self._append(db, records, head, producer=producer, operation_id=operation_id,
                                state="PENDING", event=event, deadline_ms=deadline_ms, expected=expected,
                                 node=grant["node"], subsystem=grant["subsystem"])
+
+    @staticmethod
+    def check_detector_sources(records, event):
+        confirmed = {record["pending_tag"] for record in records if record["state"] == "CONFIRMED"}
+        retained = {(record["producer"], record["event"]["event_id"]) for record in records
+                    if record["tag"] in confirmed and record["event"]["kind"] == "detector_source"}
+        if any((source["producer"], source["event_id"]) not in retained for source in event["source_ids"]):
+            raise ArchiveConflict("alert references unavailable retained source evidence")
+
+    def record_telemetry(self, token, raw_event):
+        """Commit a source or derived observation entirely within the evidence store."""
+        event = decode_event(raw_event)
+        kind, operation = event["kind"], event["event_id"]
+        if (kind not in TELEMETRY_KINDS or event["authorization"] != "observed"
+                or "detector_context" not in event or self.store_id != "detector-evidence"):
+            raise ValueError("expected a canonical detector observation in the detector archive")
+        expected = {"schema": 1, "entities": []}
+        with self.verified(write=True) as (db, records, head, _initial):
+            grant = self.authorize(db, token, "producer")
+            producer = grant["principal"]
+            if (kind not in grant["scopes"] or event["node"] != grant["node"]
+                    or event["subsystem"] != grant["subsystem"]):
+                raise ArchiveDenied("event outside producer scope")
+            for record in records:
+                if record["state"] == "PENDING" and record["producer"] == producer and record["operation_id"] == operation:
+                    terminal = next((r for r in records if r.get("pending_tag") == record["tag"]), None)
+                    if record["event"] == event and terminal and terminal["state"] == "CONFIRMED":
+                        return terminal
+                    raise ArchiveConflict("detector observation conflicts with retained evidence")
+            if records and records[-1]["state"] == "PENDING":
+                raise ArchiveConflict("unresolved pending operation")
+            if kind == "detector_alert":
+                self.check_detector_sources(records, event)
+            if len(records) + 2 > MAX_RECORDS:
+                raise ArchiveUnavailable("archive capacity exhausted")
+            pending = self._append(db, records, head, producer=producer, operation_id=operation,
+                                   state="PENDING", event=event, deadline_ms=self.now() + 5000,
+                                   expected=expected, node=grant["node"], subsystem=grant["subsystem"])
+            outcome = {"basis": "verified_commit", "before": expected, "after": expected, "delivery": "unknown"}
+            return self._terminal(db, [*records, pending], pending["tag"], pending, outcome)
 
     def finalize(self, token, pending_tag, outcome):
         digest(pending_tag)

@@ -213,3 +213,31 @@ requires Playwright and Chromium.
 | `python /tmp/devforge-organizer-toolkit/validate.py --entry ./track4_service.py` | 22 PASS lines and `Local scenario passed.` |
 | `PYTHONPATH=. python scripts/smoke_archive_ops.py` | Passed offline provision, scoped authorization, recovery without producer credential files, verified restore, and retry. |
 | `python scripts/smoke_console.py --chromium /tmp/chromium` | Passed both baseline crash scenarios, with `v1` before commit and `v2` after commit. |
+
+## Final sprint scope and release decision
+
+The independently reviewed fallback is
+`f3f9c0f30309034f3f932d30c6e3b94575abe6b0`. The candidate extends the
+local console and adds experimental detector evidence replay.
+
+**R-11 feasibility decision.** Keep the existing quarantine. A durable
+archive intent and a restored working database are compatible with both a
+kill before working commit and a successful working commit followed by a
+rollback of the working store. The current witness protects revocation and
+does not independently certify every rotation commit or noncommit. An
+elapsed timeout, released lock, absent marker, and process stdout are
+insufficient to resolve either history. A replacement protocol would need
+an independently durable commit authority, explicit fencing, and crash
+tests across its own write boundaries. No such authority ships here.
+Real SIGKILL tests still cover pending pre-commit quarantine, committed
+recovery with a scoped actor, and idempotency after archive confirmation.
+
+Detector sources and derived alerts each append an intent and confirmation
+in one archive SQLite transaction. Replay retains sources before evaluation,
+rejects conflicting IDs, and displays an alert only after confirmed,
+producer-qualified sources and the alert receipt verify. A reference to
+an earlier confirmed source is evidence of retention. Classification and
+clock uncertainty come from the existing detector and its input context.
+This is replay integration in a separate archive, with a bounded capacity.
+Live worker ingestion, R-11 automatic reconciliation, R-12 credential
+renewal, portable historical signatures, and messaging remain open.

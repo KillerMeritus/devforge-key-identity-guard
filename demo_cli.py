@@ -30,9 +30,13 @@ WORKER = Path(__file__).with_name("node_server.py")
 HTTP = build_opener(ProxyHandler({}))
 
 
+class ScenarioAssertion(RuntimeError):
+    pass
+
+
 def require(condition, message):
     if not condition:
-        raise RuntimeError(message)
+        raise ScenarioAssertion(message)
 
 
 def call(port, route, token="", fields=None, *, idempotency_key=None):
@@ -134,7 +138,7 @@ def run(phase):
         def checked_read(port, token, version):
             status, result = read(port, token, version)
             require(status == 200 and base64.b64decode(result["body"]) == BODY, "file contents changed")
-            return result
+            return {**result, "http_status": status}
 
         checked_read(b, teammate, 1)
         client = MLKEM768PrivateKey.generate()
@@ -212,14 +216,20 @@ def run(phase):
             raise RuntimeError("rotation unexpectedly acknowledged")
         a, _ = start(stack, state, "A", state / "node-a-restarted.log", port=a)
         expected = 1 if phase == "pre" else 2
+        observed_nodes = {}
         for name, port in (("A", a), ("B", b)):
             result = checked_read(port, teammate, expected)
             if name == "A":
                 recovery_ms = (time.monotonic() - stopped) * 1000
             event(name, "Teammate read verified", request_id=result["request_id"], version=expected)
+            teammate_request = result["request_id"]
+            teammate_status = result["http_status"]
             denied, result = read(port, laptop, expected)
             require(denied == 403 and result["reason"] == "revoked_device", "revocation was lost")
             revoked_request_id = result["request_id"]
+            observed_nodes[name] = dict(health=call(port, "health")[0], teammate_status=teammate_status,
+                                        teammate_request_id=teammate_request, revoked_status=denied,
+                                        revoked_reason=result["reason"], revoked_request_id=revoked_request_id)
             event(name, "Revocation survived restart", request_id=revoked_request_id)
             if phase == "post":
                 require(read(port, teammate, 1)[1]["reason"] == "wrong_version", "old version accepted")
@@ -255,7 +265,7 @@ def run(phase):
         return dict(checkpoint=phase, active_version=expected, timeline=timeline,
                     last_denial_ms=round(max(timings.values()), 2), recovery_ms=round(recovery_ms, 2),
                     evidence=guard.evidence(operator), proof_verified=True, audit_verified=True,
-                    continuity=continuity_results)
+                    continuity=continuity_results, nodes=observed_nodes)
 
 
 if __name__ == "__main__":

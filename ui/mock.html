@@ -2,28 +2,75 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Recovery Console</title>
+<title>Recovery Console · DevForge</title>
 <link rel="stylesheet" href="/console.css">
 <main>
-  <header>
-    <p class="muted">DevForge Track 4 · Secure file recovery</p>
-    <h1>Recovery Console</h1>
-    <p class="muted">Choose where to interrupt rotation. Then verify what both nodes can serve.</p>
+  <header class="masthead">
+    <div class="brand"><span class="brand-mark"></span> DEVFORGE / TRACK 4</div>
+    <nav aria-label="Console sections">
+      <a href="#recovery">Recovery</a><a href="#evidence-panel">Evidence</a><a href="#intelligence">Detection</a><a href="#archive-lab">Archive</a>
+    </nav>
   </header>
-  <section class="controls" aria-label="Recovery scenario">
-    <label>Crash checkpoint<select id="phase"><option value="pre">Before commit</option><option value="post">After commit</option></select></label>
-    <label>Predict the surviving version<select id="prediction"><option value="1">Version 1</option><option value="2">Version 2</option></select></label>
-    <button class="run" id="run">Run recovery test</button>
+
+  <section class="heading">
+    <p class="eyebrow">TWO-NODE SECURE FILE SERVICE</p>
+    <h1>Recovery Console<span>.</span></h1>
+    <p class="muted">Interrupt a key rotation and inspect what each node can serve after recovery.</p>
   </section>
-  <p id="result" role="status">Ready to run against fresh synthetic state.</p>
-  <section class="cards" aria-label="Verified outcomes">
-    <div class="card">Node A<strong id="nodeA">Awaiting test</strong></div>
-    <div class="card">Node B<strong id="nodeB">Awaiting test</strong></div>
-    <div class="card">Committed key version<strong id="version">—</strong></div>
+
+  <section id="recovery" aria-labelledby="recovery-title">
+    <div class="section-title"><h2 id="recovery-title">Recovery Lab</h2><span class="label stable">BASELINE</span></div>
+    <div class="controls">
+      <label>Crash checkpoint<select id="phase"><option value="pre">Before commit</option><option value="post">After commit</option></select></label>
+      <label>Predict the surviving version<select id="prediction"><option value="1">Version 1</option><option value="2">Version 2</option></select></label>
+      <button class="primary" id="run">Run recovery test</button>
+    </div>
+    <p id="result" class="status" role="status">Ready to run against fresh synthetic state.</p>
+    <div class="cards" aria-label="Observed outcomes">
+      <div class="card"><span class="eyebrow">NODE A</span><strong id="nodeA">Awaiting test</strong><small id="detailsA"></small></div>
+      <div class="card"><span class="eyebrow">NODE B</span><strong id="nodeB">Awaiting test</strong><small id="detailsB"></small></div>
+      <div class="card"><span class="eyebrow">COMMITTED KEY VERSION</span><strong id="version">—</strong><small id="recovery-time"></small></div>
+    </div>
   </section>
+
   <div class="layout">
-    <section class="panel"><h2>Incident timeline</h2><div id="timeline"><p class="muted">Run a scenario to populate the timeline.</p></div></section>
-    <section class="panel"><h2>Evidence</h2><pre id="evidence">Select an event to inspect its evidence.</pre></section>
+    <section class="panel" aria-labelledby="timeline-title">
+      <h2 id="timeline-title">Incident timeline</h2>
+      <div id="timeline"><p class="muted">Run a recovery scenario to see observed events.</p></div>
+    </section>
+    <section class="panel" id="evidence-panel" tabindex="-1">
+      <h2>Evidence Explorer</h2>
+      <p class="muted" id="evidence-summary">Select an event or archived finding.</p>
+      <pre id="evidence" aria-label="Evidence fields"></pre>
+    </section>
+  </div>
+
+  <section class="panel invariant-panel" aria-labelledby="invariant-title">
+    <h2 id="invariant-title">Security invariants</h2>
+    <dl class="invariants">
+      <div><dt>Revocation on both nodes</dt><dd id="check-revocation" data-state="pending">PENDING</dd></div>
+      <div><dt>Authorized teammate access</dt><dd id="check-access" data-state="pending">PENDING</dd></div>
+      <div><dt>Audit chain verification</dt><dd id="check-audit" data-state="pending">PENDING</dd></div>
+      <div><dt>Archive snapshot quarantine</dt><dd id="check-archive" data-state="pending">PENDING</dd></div>
+      <div><dt>Detector receipt binding</dt><dd id="check-detector" data-state="pending">PENDING</dd></div>
+    </dl>
+  </section>
+
+  <div class="layout lower">
+    <section class="panel" id="intelligence">
+      <div class="section-title"><h2>Detection View</h2><span class="label">EXPERIMENTAL ARCHIVE</span></div>
+      <p class="muted">Replay synthetic detector inputs and inspect confirmed source receipts.</p>
+      <button class="secondary" id="run-detection">Replay detector evidence</button>
+      <p class="status" id="detection-status" role="status"></p>
+      <div id="detections"></div>
+    </section>
+    <section class="panel" id="archive-lab">
+      <div class="section-title"><h2>Security Time Machine</h2><span class="label">EXPERIMENTAL</span></div>
+      <p class="muted">Restore a stale snapshot, retrieve retained evidence, and restore verified current state.</p>
+      <button class="secondary" id="run-archive">Run archive restore</button>
+      <p class="status" id="archive-status" role="status"></p>
+      <div id="archive-events"></div>
+    </section>
   </div>
 </main>
 <script src="/console.js" defer></script>

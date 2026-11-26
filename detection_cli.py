@@ -102,13 +102,28 @@ def benchmark(*, real_time=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--practice", type=Path)
+    parser.add_argument("--replay-archive", type=Path, help="retain replay evidence in this local directory")
     parser.add_argument("--real-time", action="store_true", help="Preserve fixture receipt intervals")
     args = parser.parse_args()
-    report = {"benchmark": benchmark(real_time=args.real_time)}
     if args.practice:
         with (args.practice / "events.csv").open() as handle:
             events = list(csv.DictReader(handle))
         approvals = json.loads((args.practice / "approvals.json").read_text())["changes"]
-        alerts, notes = analyze(events, approvals)
-        report["practice"] = {"alerts": alerts, "timing_notes": notes}
+    if args.replay_archive:
+        from kig_core.detector_archive import evidence_archive, open_evidence_archive, replay
+
+        if not args.practice:
+            events, approvals, _ = next(synthetic(1))
+        directory = args.replay_archive
+        if directory.exists():
+            configuration = open_evidence_archive(directory)
+        else:
+            directory.mkdir(mode=0o700)
+            configuration = evidence_archive(directory)
+        report = replay(*configuration, events, approvals)
+    else:
+        report = {"benchmark": benchmark(real_time=args.real_time)}
+        if args.practice:
+            alerts, notes = analyze(events, approvals)
+            report["practice"] = {"alerts": alerts, "timing_notes": notes}
     print(json.dumps(report, indent=2))

@@ -195,3 +195,42 @@ python scripts/smoke_console.py
 Source, reproducible demo, validator results, and threat-model metadata
 are included. The public GitHub release, final brief, and externally
 viewable five-minute recording need the team's release step.
+
+## Sprint demo commands
+
+Run from a clean checkout with the pinned requirements installed. The normal
+entry points continue to use the reviewed baseline controls.
+
+```sh
+python demo_cli.py --kill-at pre --json
+python demo_cli.py --kill-at post --json
+python console.py
+```
+
+Open `http://127.0.0.1:8080`. Start in **Recovery Lab**. Select a crash
+checkpoint, predict a version, run it, and open a verified event in the
+Evidence Explorer. The browser's Detection View uses a bounded synthetic
+replay and a disposable independent evidence archive. Security Time Machine
+uses a separate disposable archive-mode working store. It demonstrates
+stale-snapshot quarantine and restoration from a verified current snapshot.
+
+For persistent **experimental replay evidence**, use a fresh private
+directory path outside the repository. A subsequent invocation with the
+same input and path verifies and reuses the receipts. A different payload
+for a retained source ID is rejected.
+
+```sh
+python detection_cli.py --practice ../Track-4-Toolkit/practice \
+  --replay-archive "$HOME/devforge-detector-evidence"
+python -m unittest discover -s tests -v
+PYTHONPATH=. python tests/reviewer_worker_core.py
+PYTHONPATH=. python scripts/smoke_archive_ops.py
+python scripts/smoke_console.py
+```
+
+The detector archive is a dedicated SQLite evidence store using the same
+authenticated receipt implementation as the recovery archive. It does not
+consume live worker traffic. It retains synthetic or organizer practice event
+fields, so keep the entire state directory private, including its credential
+files. Archive receipts authenticate record provenance within this fixture.
+Portable historical ML-DSA evidence and producer renewal remain out of scope.
