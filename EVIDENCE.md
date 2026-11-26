@@ -17,3 +17,12 @@
 - Organizer toolkit revision `8901dfb`. All five labelled alert anchors matched across the 22 practice events in both original and reversed input order.
 - Uncompressed synthetic replay. 120 events, 60 expected alerts across four rules, all 60 matched and zero false positives. The measured median was 0.086 ms and p95 was 1.51 ms for this run.
 - These timings start at receipt of the last required event in the local process. They exclude external transport and the generic fallback that waits for input closure.
+
+## Post-quantum verification and access control
+
+Both crash scenarios request a signed revocation denial with a fresh
+challenge and verify it against the preconfigured ML-DSA-65 public key.
+The route test checks denied access for anonymous, reader, and revoked
+operator credentials, rejects signing from a corrupt audit chain, and
+checks verification failures for changed evidence, a wrong key, a wrong
+request ID, and a different challenge.

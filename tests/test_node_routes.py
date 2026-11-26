@@ -4,7 +4,10 @@ import secrets
 import tempfile
 import unittest
 
+from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
+
 from demo_cli import call, start
+from kig_core.attestation import verify_attestation
 from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
 
@@ -16,6 +19,9 @@ class NodeRoutesTest(unittest.TestCase):
             keys = [secrets.token_bytes(32) for _ in range(3)]
             for name, key in zip(("audit", "storage", "backup"), keys):
                 (state / f"{name}.key").write_bytes(key)
+            seed = secrets.token_bytes(32)
+            (state / "attestation.key").write_bytes(seed)
+            public = MLDSA65PrivateKey.from_seed_bytes(seed).public_key().public_bytes_raw()
             guard = Guard(state / "demo.sqlite", *keys)
             admin = guard.enroll("operator", "admin")
             reader = guard.enroll("reader")
@@ -32,3 +38,28 @@ class NodeRoutesTest(unittest.TestCase):
             self.assertEqual(evidence["proof"], "audit_chain_verified")
             self.assertEqual(call(port, "config/clock-tolerance")[1],
                              {"tolerance_seconds": LATENESS_SECONDS})
+            challenge = secrets.token_hex(32)
+            attestation_route = f"{route}/attestation"
+            fields = {"challenge": challenge}
+            self.assertEqual(call(port, attestation_route, fields=fields)[0], 401)
+            self.assertEqual(call(port, attestation_route, reader, fields)[0], 403)
+            self.assertEqual(call(port, attestation_route, admin, {"challenge": "short"})[0], 422)
+            status, signed, _ = call(port, attestation_route, admin, fields)
+            self.assertEqual(status, 200)
+
+            def verify(envelope, *, key=public, nonce=challenge, request_id=headers["X-Request-ID"]):
+                return verify_attestation(envelope, key, challenge=nonce, request_id=request_id)
+
+            self.assertTrue(verify(signed))
+            self.assertFalse(verify(signed, nonce=secrets.token_hex(32)))
+            self.assertFalse(verify(signed, request_id="different-request"))
+            another_key = MLDSA65PrivateKey.generate().public_key().public_bytes_raw()
+            self.assertFalse(verify(signed, key=another_key))
+            changed = {**signed, "event": {**signed["event"], "decision": "allow"}}
+            self.assertFalse(verify(changed))
+            with guard.transaction() as db:
+                db.execute("UPDATE audit SET event='{}' WHERE id=1")
+            self.assertEqual(call(port, attestation_route, admin, fields)[0], 503)
+            with guard.transaction() as db:
+                db.execute("UPDATE devices SET revoked=1 WHERE token=?", (guard.digest(admin),))
+            self.assertEqual(call(port, attestation_route, admin, fields)[0], 403)

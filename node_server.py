@@ -5,11 +5,13 @@ import sqlite3
 import sys
 import time
 
+from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
 from fastapi import FastAPI, Header
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 import uvicorn
 
+from kig_core.attestation import attest
 from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
 
@@ -20,6 +22,10 @@ class Request(BaseModel):
     approval: str | None = None
     public_key: str | None = None
     challenge: str | None = None
+
+
+class AttestationRequest(BaseModel):
+    challenge: str = Field(pattern=r"^[a-f0-9]{64}$", min_length=64, max_length=64)
 
 
 def worker(state, node, stop_at=None):
@@ -61,8 +67,7 @@ def worker(state, node, stop_at=None):
     def config():
         return {"tolerance_seconds": LATENESS_SECONDS}
 
-    @api.get("/evidence/{request_id}")
-    def evidence(request_id: str, authorization: str | None = Header(default=None)):
+    def find_evidence(request_id, authorization):
         try:
             events = guard.evidence(token(authorization))
         except PermissionError as error:
@@ -70,8 +75,28 @@ def worker(state, node, stop_at=None):
                                 status_code=401 if str(error) == "unauthenticated" else 403)
         for event in events:
             if event.get("request_id") == request_id:
-                return {**event, "proof": "audit_chain_verified"}
+                return event
         return JSONResponse({"error": "unknown_request"}, status_code=404)
+
+    @api.get("/evidence/{request_id}")
+    def evidence(request_id: str, authorization: str | None = Header(default=None)):
+        event = find_evidence(request_id, authorization)
+        if isinstance(event, JSONResponse):
+            return event
+        return {**event, "proof": "audit_chain_verified"}
+
+    @api.post("/evidence/{request_id}/attestation")
+    def attestation(request_id: str, request: AttestationRequest,
+                    authorization: str | None = Header(default=None)):
+        event = find_evidence(request_id, authorization)
+        if isinstance(event, JSONResponse):
+            return event
+        try:
+            seed = (state / "attestation.key").read_bytes()
+            key = MLDSA65PrivateKey.from_seed_bytes(seed)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "attestation_unavailable"}, status_code=503)
+        return attest(key, request.challenge, event)
 
     @api.post("/message")
     def message(authorization: str | None = Header(default=None)):

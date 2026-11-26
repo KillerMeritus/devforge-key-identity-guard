@@ -17,8 +17,10 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
 
+from kig_core.attestation import verify_attestation
 from kig_core.guard import Guard
 
 
@@ -93,7 +95,9 @@ def run(phase):
     with tempfile.TemporaryDirectory(prefix="track4-demo-") as path, ExitStack() as stack:
         state = Path(path)
         keys = [secrets.token_bytes(32) for _ in range(3)]
-        for name, key in zip(("audit", "storage", "backup"), keys):
+        signing_seed = secrets.token_bytes(32)
+        trusted_public_key = MLDSA65PrivateKey.from_seed_bytes(signing_seed).public_key().public_bytes_raw()
+        for name, key in zip(("audit", "storage", "backup", "attestation"), [*keys, signing_seed]):
             with open(os.open(state / f"{name}.key", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
                 handle.write(key)
         guard = Guard(state / "demo.sqlite", *keys)
@@ -202,9 +206,20 @@ def run(phase):
             event(name, "Teammate read verified", request_id=result["request_id"], version=expected)
             denied, result = read(port, laptop, expected)
             require(denied == 403 and result["reason"] == "revoked_device", "revocation was lost")
-            event(name, "Revocation survived restart", request_id=result["request_id"])
+            revoked_request_id = result["request_id"]
+            event(name, "Revocation survived restart", request_id=revoked_request_id)
             if phase == "post":
                 require(read(port, teammate, 1)[1]["reason"] == "wrong_version", "old version accepted")
+        challenge = secrets.token_hex(32)
+        route = f"evidence/{revoked_request_id}/attestation"
+        require(call(b, route, teammate, {"challenge": challenge})[0] == 403,
+                "reader obtained a signed audit record")
+        status, signed, _ = call(b, route, operator, {"challenge": challenge})
+        require(status == 200 and verify_attestation(
+            signed, trusted_public_key, challenge=challenge, request_id=revoked_request_id
+        ), "post-quantum attestation did not verify")
+        require(signed["event"]["reason"] == "revoked_device", "signed wrong decision")
+        event("Audit", "ML-DSA-65 revocation evidence verified", request_id=revoked_request_id)
         evidence = guard.evidence(operator)
         commits = [row for row in evidence if row["reason"] == "version_rotated"]
         require(len(commits) == (phase == "post"), "unexpected number of committed rotation events")
