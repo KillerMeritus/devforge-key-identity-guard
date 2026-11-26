@@ -20,7 +20,10 @@ def main():
         result = dispatch(root / "judge.sqlite", request)
     except (ValueError, UnicodeError):
         result = {"error": "invalid_request"}
-    except (OSError, sqlite3.Error, ImportError):
+    except ImportError:
+        print("Required Track 4 crypto dependency could not be loaded.", file=sys.stderr)
+        result = {"error": "service_unavailable"}
+    except (OSError, sqlite3.Error):
         result = {"error": "service_unavailable"}
     print(json.dumps(result, ensure_ascii=True))
 

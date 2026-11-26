@@ -22,7 +22,9 @@ The toolkit used during development was commit `8901dfb`. Keep it separate
 from the submission. The judge import path uses Python's standard library
 and the organizer's `pqcrypto`. FastAPI, Uvicorn, and cryptography are
 demo dependencies. The judge gets its own writable state directory and
-does not import the HTTP server.
+does not import the HTTP server. Its audit lookup covers ordinary reads
+keyed by the organizer's request ID. The demo worker separately records
+protected-read decisions in its authenticated audit chain.
 
 ## Stages and human checks
 

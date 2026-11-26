@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictInt
 import uvicorn
 
+from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
 
 
@@ -58,7 +59,7 @@ def worker(state, node, stop_at=None):
 
     @api.get("/config/clock-tolerance")
     def config():
-        return {"tolerance_seconds": 5}
+        return {"tolerance_seconds": LATENESS_SECONDS}
 
     @api.get("/evidence/{request_id}")
     def evidence(request_id: str, authorization: str | None = Header(default=None)):
