@@ -383,6 +383,79 @@ class ArchiveTest(unittest.TestCase):
                 self.archive.finalize(self.producer, pending["tag"], self.outcome)
         self.assertEqual(self.archive.position(self.producer)["pending"], pending)
 
+    def test_recovery_grant_requires_exact_pending_and_verified_outcome(self):
+        pending = self.intent()
+        token = secrets.token_urlsafe(32)
+        with self.assertRaises(ArchiveDenied):
+            self.archive.grant_recovery(self.producer, "custodian", pending["tag"],
+                                        self.outcome, self.deadline)
+        self.archive.grant_recovery(token, "custodian", pending["tag"], self.outcome,
+                                    self.deadline + 1000)
+        with self.assertRaises(ArchiveDenied):
+            self.archive.recover(token, GENESIS, self.outcome)
+        with self.assertRaises(ArchiveDenied):
+            self.archive.recover(token, pending["tag"], {**self.outcome, "delivery": "withheld"})
+        with patch.object(Archive, "now", return_value=self.deadline):
+            final = self.archive.recover(token, pending["tag"], self.outcome)
+            self.assertEqual(self.archive.recover(token, pending["tag"], self.outcome), final)
+        self.assertEqual(final["producer"], pending["producer"])
+        self.assertEqual(final["recovery_actor"], "custodian")
+
+    def test_role_changes_preserve_credential_lifecycle(self):
+        archive = Archive(self.directory / "role-archive.sqlite", "roles", **self.keys)
+        credential = {"kind": "credential", "id": "device", "version": 2,
+                      "digest": "a" * 64, "status": "revoked"}
+        before = {"schema": 1, "entities": [credential]}
+        archive.provision({self.producer: dict(
+            principal="worker-A", role="producer", node="A", subsystem="worker",
+            scopes=["role_change", "grant_change"], expires_ms=self.deadline, revoked=False,
+        )}, initial=before)
+        event = {**self.event, "kind": "role_change", "entity_id": "device",
+                 "authorization": "allow", "reason": "authorized"}
+        with self.assertRaisesRegex(ValueError, "unsupported archive operation"):
+            archive.append_intent(self.producer, "unknown", canonical({**event, "kind": "grant_change"}),
+                                  predecessor=GENESIS, deadline_ms=self.deadline, expected=before)
+        pending = archive.append_intent(self.producer, "role", canonical(event),
+                                        predecessor=GENESIS, deadline_ms=self.deadline, expected=before)
+
+        def outcome(status):
+            updated = {**credential, "version": 3, "digest": "b" * 64, "status": status}
+            return {**self.outcome, "before": before, "after": {"schema": 1, "entities": [updated]}}
+
+        with self.assertRaisesRegex(ValueError, "revoked credential"):
+            archive.finalize(self.producer, pending["tag"], outcome("active"))
+        self.assertTrue(archive.position(self.producer)["has_pending"])
+        final = archive.finalize(self.producer, pending["tag"], outcome("revoked"))
+        self.assertEqual(final["state"], "CONFIRMED")
+
+    def test_access_requires_typed_asset_grants_and_authorized_credential(self):
+        archive = Archive(self.directory / "access-archive.sqlite", "access", **self.keys)
+        credential = {"kind": "credential", "id": "brief", "version": 1,
+                      "digest": "c" * 64, "status": "active"}
+        grant = {"kind": "grant", "id": "brief", "version": 1, "digest": "d" * 64}
+        asset = self.projection["entities"][1]
+        initial = {"schema": 1, "entities": [asset, credential, grant]}
+        archive.provision({self.producer: dict(
+            principal="worker-A", role="producer", node="A", subsystem="worker",
+            scopes=["access_decision"], expires_ms=self.deadline, revoked=False,
+        )}, initial=initial)
+        event = {**self.event, "kind": "access_decision", "credential_id": "brief",
+                 "authorization": "allow", "reason": "read"}
+
+        def append(changed_event, entities):
+            return archive.append_intent(self.producer, "access", canonical(changed_event),
+                                         predecessor=GENESIS, deadline_ms=self.deadline,
+                                         expected={"schema": 1, "entities": entities})
+
+        for incomplete in ([credential], [credential, grant], [asset, credential]):
+            with self.subTest(kinds=[row["kind"] for row in incomplete]), self.assertRaises(ValueError):
+                append(event, incomplete)
+        with self.assertRaises(ArchiveConflict):
+            append({**event, "authorization": "deny", "reason": "unknown_resource"}, [credential])
+        self.assertEqual(archive.position(self.producer)["sequence"], 0)
+        pending = append(event, initial["entities"])
+        self.assertEqual(pending["state"], "PENDING")
+
     def test_explicit_creation_unknown_denial_and_revocation_noop(self):
         archive = Archive(self.directory / "transitions.sqlite", "transitions", **self.keys)
         archive.provision({self.producer: dict(

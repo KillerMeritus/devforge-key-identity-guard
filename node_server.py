@@ -1,5 +1,6 @@
 """Loopback-only demo worker. Provision state with demo_cli."""
 import argparse
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -12,9 +13,11 @@ from pydantic import BaseModel, Field, StrictInt
 import uvicorn
 
 from kig_core.attestation import attest
+from kig_core.archive import ArchiveConflict, ArchiveDenied, ArchiveUnavailable
 from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
 from kig_core.witness import RevocationWitness
+from kig_core.worker_archive import ArchivedGuard, MUTATIONS, RetryDenied, open_archive
 
 
 class Request(BaseModel):
@@ -29,7 +32,7 @@ class AttestationRequest(BaseModel):
     challenge: str = Field(pattern=r"^[a-f0-9]{64}$", min_length=64, max_length=64)
 
 
-def worker(state, node, stop_at=None):
+def worker(state, node, stop_at=None, *, archive=False):
     def checkpoint(phase):
         if phase == "prepared" and stop_at:
             print("CHECKPOINT prepared", flush=True)
@@ -46,8 +49,15 @@ def worker(state, node, stop_at=None):
 
     keys = [(state / f"{name}.key").read_bytes() for name in ("audit", "storage", "backup")]
     witness = RevocationWitness(state / "witness" / "checkpoint.sqlite", keys[0])
-    guard = Guard(state / "demo.sqlite", *keys, checkpoint=checkpoint, witness=witness)
+    guard = Guard(state / "demo.sqlite", *keys, checkpoint=checkpoint, witness=witness,
+                  bootstrap=not archive)
     api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    def archived_guard():
+        try:
+            return ArchivedGuard(guard, state, node)
+        except (OSError, ValueError) as error:
+            raise ArchiveUnavailable("archive configuration unavailable") from error
 
     def token(header):
         scheme, _, value = (header or "").partition(" ")
@@ -60,6 +70,19 @@ def worker(state, node, stop_at=None):
     @api.exception_handler(ValueError)
     def evidence_error(_, __):
         return JSONResponse({"error": "verification_failed"}, status_code=503)
+
+    @api.exception_handler(ArchiveUnavailable)
+    @api.exception_handler(OSError)
+    def archive_error(_, __):
+        return JSONResponse({"error": "audit_state_unavailable"}, status_code=503)
+
+    @api.exception_handler(ArchiveDenied)
+    def archive_producer_error(_, __):
+        return JSONResponse({"error": "audit_state_unavailable"}, status_code=503)
+
+    @api.exception_handler(ArchiveConflict)
+    def archive_conflict(_, __):
+        return JSONResponse({"error": "operation_conflict"}, status_code=409)
 
     @api.get("/health")
     def health():
@@ -82,6 +105,9 @@ def worker(state, node, stop_at=None):
 
     @api.get("/evidence/{request_id}")
     def evidence(request_id: str, authorization: str | None = Header(default=None)):
+        if archive:
+            return archived_evidence(request_id, authorization,
+                                     lambda event: {**event, "proof": "audit_chain_verified"})
         event = find_evidence(request_id, authorization)
         if isinstance(event, JSONResponse):
             return event
@@ -90,20 +116,48 @@ def worker(state, node, stop_at=None):
     @api.post("/evidence/{request_id}/attestation")
     def attestation(request_id: str, request: AttestationRequest,
                     authorization: str | None = Header(default=None)):
+        def sign(event):
+            if event["node"] != node:
+                return JSONResponse({"error": "evidence_belongs_to_another_node"}, status_code=409)
+            try:
+                seed = (state / f"attestation-{node}.key").read_bytes()
+                key = MLDSA65PrivateKey.from_seed_bytes(seed)
+            except (OSError, ValueError):
+                return JSONResponse({"error": "attestation_unavailable"}, status_code=503)
+            return attest(key, node, request.challenge, event)
+
+        if archive:
+            return archived_evidence(request_id, authorization, sign)
         event = find_evidence(request_id, authorization)
-        if isinstance(event, JSONResponse):
-            return event
-        if event["node"] != node:
-            return JSONResponse({"error": "evidence_belongs_to_another_node"}, status_code=409)
+        return event if isinstance(event, JSONResponse) else sign(event)
+
+    def archived_evidence(request_id, authorization, render):
+        result = archived_guard().execute(token(authorization), "evidence", request_id, render=render)
+        if result["allowed"]:
+            return result["evidence"]
+        reason = result["reason"]
+        status, error = {"invalid_device": (401, "unauthenticated"),
+                         "unknown_request": (404, "unknown_request")}.get(reason, (403, "forbidden"))
+        return JSONResponse({"error": error}, status_code=status)
+
+    @api.get("/historical/{producer}/{event_id}")
+    def historical(producer: str, event_id: str, authorization: str | None = Header(default=None)):
+        if not archive:
+            return JSONResponse({"error": "unsupported_route"}, status_code=404)
         try:
-            seed = (state / f"attestation-{node}.key").read_bytes()
-            key = MLDSA65PrivateKey.from_seed_bytes(seed)
-        except (OSError, ValueError):
-            return JSONResponse({"error": "attestation_unavailable"}, status_code=503)
-        return attest(key, node, request.challenge, event)
+            retained = open_archive(state).retrieve(token(authorization), producer, event_id)
+        except ArchiveDenied:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        except LookupError:
+            return JSONResponse({"error": "unknown_event"}, status_code=404)
+        raw = retained.pop("event_bytes")
+        return {**retained, "original_canonical_event": raw.decode("ascii"),
+                "event": json.loads(raw)}
 
     @api.post("/message")
     def message(authorization: str | None = Header(default=None)):
+        if archive:
+            return JSONResponse({"error": "messaging not supported in this track"}, status_code=501)
         result = guard.execute(node, token(authorization), "message", "")
         if result["reason"] == "invalid_device":
             return JSONResponse({"error": "unauthenticated"}, status_code=401)
@@ -113,10 +167,20 @@ def worker(state, node, stop_at=None):
                             status_code=501, headers={"X-Request-ID": result["request_id"]})
 
     @api.post("/{action}")
-    def execute(action: str, request: Request, authorization: str | None = Header(default=None)):
+    def execute(action: str, request: Request, authorization: str | None = Header(default=None),
+                idempotency_key: str | None = Header(default=None)):
         if action not in {"read", "revoke", "rotate", "enroll"}:
             return JSONResponse({"error": "unsupported_route"}, status_code=404)
-        result = guard.execute(node, token(authorization), action, **request.model_dump())
+        if archive:
+            if action in MUTATIONS and not idempotency_key:
+                return JSONResponse({"error": "idempotency_key_required"}, status_code=400)
+            try:
+                result = archived_guard().execute(token(authorization), action, **request.model_dump(),
+                                                  idempotency_key=idempotency_key)
+            except RetryDenied:
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+        else:
+            result = guard.execute(node, token(authorization), action, **request.model_dump())
         status = 200 if result["allowed"] else 403
         if result["reason"] == "invalid_device":
             status = 401
@@ -130,7 +194,8 @@ if __name__ == "__main__":
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--node", required=True, choices=["A", "B"])
     parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--test-stop-at", choices=["pre", "post"])
+    parser.add_argument("--test-stop-at", choices=["pre", "committed", "post"])
+    parser.add_argument("--archive", action="store_true")
     args = parser.parse_args()
-    uvicorn.run(worker(args.state, args.node, args.test_stop_at), host="127.0.0.1",
+    uvicorn.run(worker(args.state, args.node, args.test_stop_at, archive=args.archive), host="127.0.0.1",
                 port=args.port, access_log=False, log_level="warning")

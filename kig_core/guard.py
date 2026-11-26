@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import hmac
 import json
+from pathlib import Path
 import secrets
 import time
 
@@ -17,13 +18,17 @@ from .db import enable_wal, transaction
 
 
 class Guard:
-    def __init__(self, path, audit_key, storage_key, backup_key=None, checkpoint=None, *, witness=None):
+    def __init__(self, path, audit_key, storage_key, backup_key=None, checkpoint=None, *, witness=None,
+                 bootstrap=True):
         self.path = path
         self.audit_key = audit_key
         self.storage_key = storage_key
         self.backup_key = backup_key
         self.witness = witness
         self.checkpoint = checkpoint or (lambda _: None)
+        self.existing_only = not bootstrap
+        if self.existing_only:
+            return
         enable_wal(path)
         with transaction(self.path) as db:
             for ddl in (
@@ -38,7 +43,10 @@ class Guard:
 
     @contextmanager
     def transaction(self, *, write=True):
-        with transaction(self.path, write=write) as db:
+        path = self.path
+        if self.existing_only:
+            path = Path(path).resolve().as_uri() + ("?mode=rw" if write else "?mode=ro")
+        with transaction(path, write=write, uri=self.existing_only) as db:
             if self.witness is not None:
                 self.witness.check(db)
             yield db

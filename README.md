@@ -126,6 +126,48 @@ interrupted revocation can leave the checkpoint ahead of the file store.
 In that case the workers withhold protected operations pending trusted
 recovery.
 
+## Archive-enabled worker integration
+
+The two HTTP workers support an opt-in archive mode. In that mode, protected
+reads and fresh evidence require verified current rows and a durable archive
+confirmation. Revocation, rotation, and enrolment require an `Idempotency-Key`
+header. Reuse the original key when retrying the same request. A successful
+enrolment retry returns the device reference without redisclosing its token.
+
+Provision a stopped, known-good demo state once, then start both workers on
+the same directory. The investigator credential path must be a new file kept
+outside the working database's restore boundary.
+
+```sh
+python archive_ops.py --state "$state" provision "$investigator_credential_file"
+python node_server.py --archive --state "$state" --node A --port 8081
+python node_server.py --archive --state "$state" --node B --port 8082
+```
+
+`GET /historical/{producer}/{event_id}` accepts the independently scoped
+investigator bearer credential and returns the original canonical archive event
+and its receipts. The endpoint remains available during working-store
+quarantine when the archive and investigator grant verify.
+
+From the trusted offline environment, inspect the pending receipt and authorize
+recovery only after the coordinator verifies the corresponding committed rows
+and transaction marker. Provide the separately authorized actor with the
+credential file through the trusted operator channel.
+
+```sh
+python archive_ops.py --state "$state" status
+python archive_ops.py --state "$state" authorize-recovery "$pending_tag" "$recovery_actor" "$recovery_credential_file"
+python archive_ops.py --state "$state" recover "$pending_tag" "$recovery_credential_file"
+python archive_ops.py --state "$state" restore "$verified_snapshot"
+```
+
+The recovery and restore commands verify under the same lock used by the
+workers. If a killed worker left a pending receipt without positive evidence
+of commit or rollback, both workers return HTTP 503 for protected operations.
+Retain the stores for investigation and reconcile the pending operation with
+trusted evidence. The default demo and organizer adapter remain available for
+release verification while the opt-in archive release gates are open.
+
 ## Submission status
 
 Source, reproducible demo, validator results, and threat-model metadata

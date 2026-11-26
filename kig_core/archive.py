@@ -77,11 +77,14 @@ def event_schema(value):
     names = "version event_id request_id actor node subsystem kind entity_id authorization reason received_ms source_ids"
     rotation = kind == "rotation" and value.get("authorization") == "allow"
     fields(value, names + (" approval_id" if rotation else "") + (" timing" if kind in TELEMETRY_KINDS else "")
+           + (" credential_id" if "credential_id" in value else "")
            + (" rule_id rule_version approval_ref" if kind == "detector_alert" else ""))
     if type(value["version"]) is not int or value["version"] != 2 or kind not in KINDS:
         raise ValueError("unsupported event schema or kind")
     for name in ("event_id", "request_id", "actor", "node", "subsystem", "entity_id", "reason"):
         identifier(value[name])
+    if "credential_id" in value:
+        identifier(value["credential_id"])
     if value["authorization"] not in ("allow", "deny", "observed", "unavailable"):
         raise ValueError("invalid event result")
     if rotation:
@@ -153,14 +156,23 @@ def outcome_schema(outcome, pending):
     if before != pending["expected"]:
         raise ArchiveConflict("outcome pre-state disagrees with intent")
     event = pending["event"]
+    kind = event["kind"]
+    changes = list(zip(before["entities"], after["entities"]))
+    for old, new in changes:
+        if old["kind"] != "credential" or old == new:
+            continue
+        if old["status"] == "revoked" and new["status"] != "revoked":
+            raise ValueError("revoked credential cannot change status")
+        if (kind not in {"revocation", "enrolment", "role_change"}
+                or old["id"] != event["entity_id"]):
+            raise ValueError("operation cannot change this credential")
     if outcome["basis"] == "verified_noncommit":
         if before != after or outcome["delivery"] != "withheld":
             raise ValueError("abort must leave state unchanged and withhold response data")
     elif event["authorization"] == "allow" and event["kind"] in STATE_MUTATIONS:
-        kind = event["kind"]
-        changes = list(zip(before["entities"], after["entities"]))
         if kind == "revocation":
-            old, new = changes[0]
+            old, new = next((old, new) for old, new in changes
+                            if (old["kind"], old["id"]) == ("credential", event["entity_id"]))
             if event["reason"] == "already_revoked":
                 if old["status"] != "revoked" or before != after:
                     raise ValueError("idempotent revocation requires unchanged revoked state")
@@ -168,20 +180,30 @@ def outcome_schema(outcome, pending):
                   or new["version"] != old["version"] + 1 or old["digest"] == new["digest"]):
                 raise ValueError("revocation must transition active state to revoked")
         elif kind in CREATION_KINDS:
-            if any(old["version"] != 0 or new["version"] != 1 for old, new in changes):
+            target = CREATION_KINDS[kind], event["entity_id"]
+            old, new = next((old, new) for old, new in changes if (old["kind"], old["id"]) == target)
+            if old["version"] != 0 or new["version"] != 1:
                 raise ValueError("creation must transition from absent to version one")
-            if kind == "enrolment" and after["entities"][0]["status"] != "active":
+            if kind == "enrolment" and new["status"] != "active":
                 raise ValueError("enrolment must establish an active credential")
         elif kind == "rotation":
             for old, new in changes:
+                if old["kind"] == "credential":
+                    continue
                 if old["version"] == 0 or old["digest"] == new["digest"]:
                     raise ValueError("rotation requires existing state and new content")
                 if old["kind"] == "asset" and new["version"] != old["version"] + 1:
                     raise ValueError("rotation must advance the asset by one version")
                 if old["kind"] == "approval" and new["version"] != 0:
                     raise ValueError("rotation must consume its bound approval")
-        elif before == after:
-            raise ValueError("successful mutation must bind a state change")
+        elif kind == "role_change":
+            old, new = next((old, new) for old, new in changes
+                            if (old["kind"], old["id"]) == ("credential", event["entity_id"]))
+            if (old["status"] != new["status"] or old["status"] == "absent"
+                    or new["version"] != old["version"] + 1 or old["digest"] == new["digest"]):
+                raise ValueError("role change must preserve credential lifecycle")
+        else:
+            raise ValueError("unsupported state transition")
     elif before != after:
         raise ValueError("non-mutation or denied intent cannot change projected state")
 
@@ -189,6 +211,55 @@ def outcome_schema(outcome, pending):
 def producer_allows(grant, record):
     return (record["producer"] == grant["principal"] and record["node"] == grant["node"]
             and record["subsystem"] == grant["subsystem"] and record["event"]["kind"] in grant["scopes"])
+
+
+def intent_projection(event, expected):
+    entries = {(row["kind"], row["id"]): row for row in expected["entities"]}
+    keys = set(entries)
+    kind, target = event["kind"], event["entity_id"]
+    allowed = event["authorization"] == "allow"
+    caller = {("credential", event["credential_id"])} if "credential_id" in event else set()
+    if caller and (not caller <= keys or (allowed and entries[next(iter(caller))]["status"] != "active")):
+        raise ValueError("intent must bind the authenticated credential")
+    if kind in TELEMETRY_KINDS:
+        required = set()
+    elif kind == "access_decision":
+        if event["authorization"] == "deny" and event["reason"] == "unknown_resource":
+            required = caller
+        else:
+            required = caller | {("asset", target), ("grant", target)}
+            if allowed and not caller:
+                raise ValueError("protected access requires an authenticated credential")
+    elif kind == "evidence_access":
+        if allowed and not caller:
+            raise ValueError("evidence access requires an authenticated credential")
+        required = caller
+    elif kind == "rotation":
+        required = caller | {("asset", target)}
+        if allowed:
+            required.add(("approval", event["approval_id"]))
+            if not required <= keys or any(entries[key]["version"] == 0 for key in required):
+                raise ValueError("rotation must bind a live asset and approval")
+        else:
+            # A denied rotation may bind the approval evaluated by the application.
+            approvals = {key for key in keys if key[0] == "approval"}
+            if len(approvals) > 1:
+                raise ValueError("rotation covers multiple approvals")
+            required |= approvals
+    elif kind in {"revocation", "role_change"}:
+        required = caller | {("credential", target)}
+        if kind == "revocation" and allowed and event["reason"] not in ("revoked", "already_revoked"):
+            raise ValueError("unsupported revocation decision")
+    elif kind in CREATION_KINDS:
+        required = caller | ({(CREATION_KINDS[kind], target)} if allowed else set())
+        if allowed and entries.get((CREATION_KINDS[kind], target), {}).get("version") != 0:
+            raise ValueError("creation must bind an absent entity")
+    else:
+        raise ValueError("unsupported archive operation")
+    if keys != required:
+        raise ValueError("intent must cover its required entity types")
+    if kind == "access_decision" and required - caller and any(entries[key]["version"] == 0 for key in required - caller):
+        raise ValueError("known-resource access requires its asset and grants")
 
 
 
@@ -261,6 +332,7 @@ class Archive:
                 canonical(initial), self.mac(self.receipt_key, b"archive-initial-v1", initial)))
             db.execute("CREATE TABLE records(seq INTEGER PRIMARY KEY, body BLOB, tag TEXT)")
             db.execute("CREATE TABLE grants(digest TEXT PRIMARY KEY, body BLOB, proof TEXT)")
+            db.execute("CREATE TABLE recovery_grants(digest TEXT PRIMARY KEY, body BLOB, proof TEXT)")
             db.executemany("INSERT INTO grants VALUES(?,?,?)", prepared)
             db.execute("INSERT INTO head VALUES(1,0,?,?)", (GENESIS, self.head_proof(0, GENESIS)))
         directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -359,36 +431,16 @@ class Archive:
         digest(predecessor)
         integer(deadline_ms)
         event = decode_event(raw_event)
-        keys = projection_schema(expected)
+        projection_schema(expected)
         kind = event["kind"]
         creating = event["authorization"] == "allow" and kind in CREATION_KINDS
-        no_projection = kind in TELEMETRY_KINDS or (
-            kind == "access_decision" and event["authorization"] == "deny"
-            and event["reason"] == "unknown_resource")
-        if no_projection:
-            if keys:
-                raise ValueError("this event must not assert entity state")
-        elif event["entity_id"] not in {entity_id for _, entity_id in keys}:
-            raise ValueError("intent must cover the event entity")
-        if creating and (keys != [(CREATION_KINDS[kind], event["entity_id"])]
-                         or expected["entities"][0]["version"] != 0):
-            raise ValueError("creation must bind one absent entity")
-        if kind == "revocation" and event["authorization"] == "allow" and (
-            keys != [("credential", event["entity_id"])]
-            or event["reason"] not in ("revoked", "already_revoked")
-        ):
-            raise ValueError("revocation must bind a credential and a supported decision")
-        if kind == "rotation" and event["authorization"] == "allow":
-            if keys != [("approval", event["approval_id"]), ("asset", event["entity_id"])] or any(
-                item["version"] == 0 for item in expected["entities"]
-            ):
-                raise ValueError("rotation must cover the asset and its live approval")
         with self.verified(write=True) as (db, records, head, initial):
             grant = self.authorize(db, token, "producer")
             producer = grant["principal"]
             if (event["kind"] not in grant["scopes"] or event["node"] != grant["node"]
                     or event["subsystem"] != grant["subsystem"]):
                 raise ArchiveDenied("event outside producer scope")
+            intent_projection(event, expected)
             for record in records:
                 if record["state"] != "PENDING" or record["producer"] != producer:
                     continue
@@ -406,17 +458,21 @@ class Archive:
             latest = {(entry["kind"], entry["id"]): entry for entry in initial["entities"]}
             for record in records:
                 if record["state"] == "CONFIRMED":
-                    for entry in record["outcome"]["after"]["entities"]:
-                        latest[entry["kind"], entry["id"]] = entry
-            if kind == "access_decision" and no_projection:
+                    for old, new in zip(record["outcome"]["before"]["entities"],
+                                        record["outcome"]["after"]["entities"]):
+                        if old != new:
+                            latest[new["kind"], new["id"]] = new
+            if kind == "access_decision" and event["reason"] == "unknown_resource":
                 asset = latest.get(("asset", event["entity_id"]))
                 if asset is not None and asset["version"] != 0:
                     raise ArchiveConflict("known asset cannot be recorded as unknown")
             for entry in expected["entities"]:
                 known = latest.get((entry["kind"], entry["id"]))
-                if known is None and not creating:
+                new_entity = creating and (entry["kind"], entry["id"]) == (CREATION_KINDS[kind], event["entity_id"])
+                denied_absence = event["authorization"] == "deny" and entry["version"] == 0
+                if known is None and not (new_entity or denied_absence):
                     raise ArchiveConflict("intent references unanchored state")
-                if known is not None and (known != entry or creating):
+                if known is not None and (known != entry or new_entity):
                     raise ArchiveConflict("intent disagrees with latest retained projection")
             if kind == "detector_alert":
                 confirmed = {record["pending_tag"] for record in records if record["state"] == "CONFIRMED"}
@@ -435,24 +491,72 @@ class Archive:
         digest(pending_tag)
         with self.verified(write=True) as (db, records, head, _initial):
             grant = self.authorize(db, token, "producer")
-            pending = next((r for r in records if r["tag"] == pending_tag and r["state"] == "PENDING"), None)
-            if pending is None:
-                raise ArchiveConflict("unknown pending receipt")
+            pending = self.pending_record(records, pending_tag)
             if not producer_allows(grant, pending):
                 raise ArchiveDenied("pending receipt outside producer scope")
-            outcome_schema(outcome, pending)
-            state = "CONFIRMED" if outcome["basis"] == "verified_commit" else "ABORTED"
-            for record in records:
-                if record.get("pending_tag") == pending_tag:
-                    if record["state"] == state and record["outcome"] == outcome:
-                        return record
-                    raise ArchiveConflict("terminal outcome already recorded")
+            return self._terminal(db, records, head, pending, outcome)
+
+    @staticmethod
+    def pending_record(records, pending_tag):
+        pending = next((r for r in records if r["tag"] == pending_tag and r["state"] == "PENDING"), None)
+        if pending is None:
+            raise ArchiveConflict("unknown pending receipt")
+        return pending
+
+    def _terminal(self, db, records, head, pending, outcome, **recovery):
+        outcome_schema(outcome, pending)
+        pending_tag = pending["tag"]
+        state = "CONFIRMED" if outcome["basis"] == "verified_commit" else "ABORTED"
+        for record in records:
+            if record.get("pending_tag") == pending_tag:
+                if record["state"] == state and record["outcome"] == outcome:
+                    return record
+                raise ArchiveConflict("terminal outcome already recorded")
+        if head != pending_tag:
+            raise ArchiveConflict("pending receipt is not at the archive head")
+        return self._append(db, records, head, producer=pending["producer"],
+                           operation_id=pending["operation_id"], state=state,
+                           pending_tag=pending_tag, outcome=outcome, node=pending["node"],
+                           subsystem=pending["subsystem"], **recovery)
+
+    def grant_recovery(self, token, principal, pending_tag, outcome, expires_ms):
+        """Trusted offline authority binds a separate credential to one verified outcome."""
+        identifier(principal)
+        digest(pending_tag)
+        integer(expires_ms)
+        if expires_ms <= self.now():
+            raise ArchiveDenied("recovery grant already expired")
+        hashed = self.token_digest(token)
+        grant = {"principal": principal, "pending_tag": pending_tag, "expires_ms": expires_ms,
+                 "outcome_digest": hashlib.sha256(canonical(outcome)).hexdigest()}
+        with self.verified(write=True) as (db, records, head, _):
             if head != pending_tag:
-                raise ArchiveConflict("pending receipt is not at the archive head")
-            return self._append(db, records, head, producer=pending["producer"],
-                               operation_id=pending["operation_id"], state=state,
-                               pending_tag=pending_tag, outcome=outcome,
-                                node=grant["node"], subsystem=grant["subsystem"])
+                raise ArchiveConflict("only the outstanding intent may be authorized")
+            pending = self.pending_record(records, pending_tag)
+            if principal == pending["producer"] or db.execute(
+                "SELECT 1 FROM grants WHERE digest=?", (hashed,)
+            ).fetchone():
+                raise ArchiveDenied("recovery requires a distinct identity and credential")
+            outcome_schema(outcome, pending)
+            proof = self.mac(self.grant_key, b"archive-recovery-grant-v1", [hashed, grant])
+            db.execute("INSERT INTO recovery_grants VALUES(?,?,?)", (hashed, canonical(grant), proof))
+
+    def recover(self, token, pending_tag, outcome):
+        digest(pending_tag)
+        hashed = self.token_digest(token)
+        with self.verified(write=True) as (db, records, head, _):
+            row = db.execute("SELECT body,proof FROM recovery_grants WHERE digest=?", (hashed,)).fetchone()
+            if row is None:
+                raise ArchiveDenied("unknown recovery credential")
+            grant = json.loads(row[0])
+            proof = self.mac(self.grant_key, b"archive-recovery-grant-v1", [hashed, grant])
+            if row[0] != canonical(grant) or not hmac.compare_digest(row[1], proof):
+                raise ArchiveUnavailable("invalid recovery grant")
+            if (grant["pending_tag"] != pending_tag or grant["expires_ms"] <= self.now()
+                    or grant["outcome_digest"] != hashlib.sha256(canonical(outcome)).hexdigest()):
+                raise ArchiveDenied("recovery credential outside verified outcome")
+            pending = self.pending_record(records, pending_tag)
+            return self._terminal(db, records, head, pending, outcome, recovery_actor=grant["principal"])
 
     def retrieve(self, token, producer, event_id):
         identifier(producer)

@@ -30,6 +30,9 @@ def run(path):
     deadline = archive.now() + 300_000
     projection = {"schema": 1, "entities": [
         {"kind": "asset", "id": "fixture", "version": 1, "digest": "a" * 64},
+        {"kind": "credential", "id": "device", "version": 1,
+         "digest": "b" * 64, "status": "active"},
+        {"kind": "grant", "id": "fixture", "version": 1, "digest": "c" * 64},
     ]}
     archive.provision({producer: dict(principal="writer", role="producer",
                                      scopes=["access_decision"], expires_ms=deadline,
@@ -43,6 +46,7 @@ def run(path):
         name = f"op-{operations}"
         event = canonical(dict(version=2, event_id=name, request_id=name, actor="fixture-user",
                                node="A", subsystem="worker", kind="access_decision",
+                               credential_id="device",
                                entity_id="fixture", authorization="allow", reason="authorized",
                                received_ms=archive.now(), source_ids=[]))
         pending, append_ms = sample(lambda: archive.append_intent(

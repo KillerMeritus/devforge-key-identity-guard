@@ -35,11 +35,13 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def call(port, route, token="", fields=None):
+def call(port, route, token="", fields=None, *, idempotency_key=None):
     data = None if fields is None else json.dumps(fields).encode()
     request = Request(f"http://127.0.0.1:{port}/{route}", data=data, headers={
         "Authorization": f"Bearer {token}", "Content-Type": "application/json",
     })
+    if idempotency_key is not None:
+        request.add_header("Idempotency-Key", idempotency_key)
     try:
         response = HTTP.open(request, timeout=8)
     except HTTPError as error:
@@ -57,7 +59,7 @@ def wait_for(predicate, description):
     raise RuntimeError(f"Timed out waiting for {description}")
 
 
-def start(stack, state, node, log, port=None, checkpoint=None):
+def start(stack, state, node, log, port=None, checkpoint=None, *, archive=False):
     if not port:
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
@@ -66,6 +68,8 @@ def start(stack, state, node, log, port=None, checkpoint=None):
                "--port", str(port)]
     if checkpoint:
         command.extend(["--test-stop-at", checkpoint])
+    if archive:
+        command.append("--archive")
     with log.open("wb") as output:
         process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
 
@@ -174,7 +178,7 @@ def run(phase):
         require(denied == 403 and mismatch["reason"] == "approval_target_mismatch", "approval mismatch missed")
         event("B", "Approval target mismatch", request_id=mismatch["request_id"])
         reconnect = pool.submit(execute, a, "rotate", operator, target="brief", version=1, approval=approval)
-        wait_for(lambda: "CHECKPOINT prepared" in log.read_text(), "prepared ciphertext")
+        wait_for(lambda: "CHECKPOINT prepared" in log.read_text().splitlines(), "prepared ciphertext")
 
         def continuity(version, label):
             samples, request_ids = [], []
@@ -191,7 +195,7 @@ def run(phase):
         continuity_results = {"prepared": continuity(1, "Teammate reads during rotation preparation")}
         require(not reconnect.done(), "rotation finished before the preparation probe")
         (state / "resume-rotation").touch()
-        wait_for(lambda: f"CHECKPOINT {phase}" in log.read_text(), f"{phase}-commit checkpoint")
+        wait_for(lambda: f"CHECKPOINT {phase}" in log.read_text().splitlines(), f"{phase}-commit checkpoint")
         if phase == "post":
             continuity_results["committed"] = continuity(2, "Teammate reads after commit before rotation reply")
             require(not reconnect.done(), "rotation replied before the post-commit probe")

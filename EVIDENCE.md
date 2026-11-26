@@ -157,3 +157,35 @@ is a worker-integration gate, with no automatic fallback to expired grants.
 The baseline workers still run without archive integration. The prior
 capacity benchmark describes its measured revision. No new capacity
 performance claim is made here.
+
+## Worker integration candidate
+
+Base revision `a9aede2b6661fc273d3fbe3a2182d37f4abe4df4`. The archive mode
+enforces durable confirmation for reads, revocations, rotations, enrolment,
+and current evidence on both loopback HTTP workers. The release-suite restore
+test now runs by default. The baseline harness waits for the exact pre-commit
+checkpoint before sending `SIGKILL`.
+
+| Boundary | Observed result |
+|---|---|
+| Before working commit | SIGKILL leaves the archive intent pending and both workers withhold protected operations. A missing marker prevents recovery authorization. A controlled live rollback yields `ABORTED` and requires a new operation ID. |
+| After working commit, before archive confirmation | Both workers withhold protected operations. A separate recovery grant confirms the exact persisted outcome when the original producer fails its expiry check. The terminal receipt records both identities. |
+| After archive confirmation, before reply | The peer serves the new version. A retry on either worker returns the original receipt's outcome. The same key with a changed intent returns HTTP 409. |
+| Restored or modified working rows | Both workers withhold reads and fresh attestations on either retained restore boundary. A scoped investigator can retrieve the later event. A verified current snapshot restores service. Deleting a projected grant with genuine markers and receipts also withholds protected reads. |
+| Archive or credential failure | A missing, corrupt, or exhausted archive withholds protected responses. Revoked callers cannot use supported protected routes or replay successful mutations. |
+
+| Command | Observed result |
+|---|---|
+| `python -m unittest discover -s tests -v` | 45 passed with zero skips on Linux and Python 3.12.14. |
+| `python /tmp/devforge-organizer-toolkit/validate.py --entry ./track4_service.py` | Toolkit `8901dfbdbfe048853e0bfa25b60583d1e6617a63` printed 22 PASS lines and `Local scenario passed.` |
+| `python detection_cli.py --practice /tmp/devforge-organizer-toolkit/practice` | Five alerts on the organizer's practice data. Synthetic replay matched 60 of 60 positives, with zero false positives and zero false negatives. |
+| `python /tmp/devforge-console-smoke.py` | Playwright on Chromium `158.0.8127.0` showed `v1` for pre-commit and `v2` for post-commit, both nodes verified, and verified audit evidence openable in both cases. |
+
+Archive release stays gated. A process kill without positive commit or
+noncommit evidence still requires trusted reconciliation. The archive exposes
+original authenticated receipts for historical investigation. Retention of
+original node signatures, investigator grant rotation and retrieval audit,
+detector ingestion, and other PRD lifecycle event producers are pending.
+Archive capacity is bounded and the trusted components share one host and
+filesystem authority. Keep the 105-minute reserve for release verification,
+documentation, and rehearsal.
