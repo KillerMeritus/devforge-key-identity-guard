@@ -23,6 +23,14 @@ class Request(BaseModel):
 
 def worker(state, node, stop_at=None):
     def checkpoint(phase):
+        if phase == "prepared" and stop_at:
+            print("CHECKPOINT prepared", flush=True)
+            release = state / "resume-rotation"
+            deadline = time.monotonic() + 5
+            while not release.exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Rotation preparation checkpoint expired")
+                time.sleep(0.01)
         if phase == stop_at:
             print(f"CHECKPOINT {phase}", flush=True)
             while True:

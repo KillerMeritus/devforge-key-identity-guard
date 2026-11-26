@@ -97,6 +97,7 @@ class Guard:
                         prepared = row[0]
             if prepared is not None:
                 prepared = self.encrypt(target, version + 1, self.decrypt(target, version, prepared))
+                self.checkpoint("prepared")
 
         with self.transaction() as db:
             identity = self.identity(db, token)

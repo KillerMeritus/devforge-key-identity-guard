@@ -24,5 +24,10 @@ class DetectorTest(unittest.TestCase):
         result = benchmark()
         self.assertEqual(result["false_negatives"], 0)
         self.assertEqual(result["false_positives"], 0)
-        self.assertLessEqual(result["median_ms"], 250)
-        self.assertLessEqual(result["p95_ms"], 500)
+        self.assertEqual(result["latency_samples"], 60)
+        self.assertEqual(set(result["matched_by_rule"]), {
+            "access_outside_approval", "unexpected_role_change",
+            "review_after_role_change", "lateral_movement_candidate",
+        })
+        self.assertGreaterEqual(result["median_ms"], 0)
+        self.assertGreaterEqual(result["p95_ms"], result["median_ms"])

@@ -16,6 +16,12 @@ class DemoTest(unittest.TestCase):
                 result = run(phase)
                 self.assertEqual(result["active_version"], version)
                 self.assertTrue(result["audit_verified"])
+                self.assertEqual(result["continuity"]["prepared"]["reads"], 5)
+                self.assertEqual(result["continuity"]["prepared"]["errors"], 0)
+                if phase == "post":
+                    self.assertEqual(result["continuity"]["committed"]["reads"], 5)
+                else:
+                    self.assertNotIn("committed", result["continuity"])
                 self.assertEqual(sum(r["label"] == "Revocation survived restart"
                                      for r in result["timeline"]), 2)
 

@@ -161,7 +161,27 @@ def run(phase):
         require(denied == 403 and mismatch["reason"] == "approval_target_mismatch", "approval mismatch missed")
         event("B", "Approval target mismatch", request_id=mismatch["request_id"])
         reconnect = pool.submit(execute, a, "rotate", operator, target="brief", version=1, approval=approval)
+        wait_for(lambda: "CHECKPOINT prepared" in log.read_text(), "prepared ciphertext")
+
+        def continuity(version, label):
+            samples, request_ids = [], []
+            for _ in range(5):
+                started = time.monotonic_ns()
+                peer_read = checked_read(b, teammate, version)
+                request_ids.append(peer_read["request_id"])
+                samples.append((time.monotonic_ns() - started) / 1_000_000)
+            summary = dict(reads=len(samples), errors=0, max_latency_ms=round(max(samples), 2))
+            event("B", label, request_id=request_ids[-1], request_ids=request_ids,
+                  version=version, **summary)
+            return summary
+
+        continuity_results = {"prepared": continuity(1, "Teammate reads during rotation preparation")}
+        require(not reconnect.done(), "rotation finished before the preparation probe")
+        (state / "resume-rotation").touch()
         wait_for(lambda: f"CHECKPOINT {phase}" in log.read_text(), f"{phase}-commit checkpoint")
+        if phase == "post":
+            continuity_results["committed"] = continuity(2, "Teammate reads after commit before rotation reply")
+            require(not reconnect.done(), "rotation replied before the post-commit probe")
         event("Harness", f"Reached {phase}-commit checkpoint")
         victim.kill()
         require(victim.wait(timeout=5) == -signal.SIGKILL, "expected SIGKILL termination")
@@ -205,7 +225,8 @@ def run(phase):
         require(call(b, "config/clock-tolerance")[1] == {"tolerance_seconds": 5}, "bad clock config")
         return dict(checkpoint=phase, active_version=expected, timeline=timeline,
                     last_denial_ms=round(max(timings.values()), 2), recovery_ms=round(recovery_ms, 2),
-                    evidence=guard.evidence(operator), proof_verified=True, audit_verified=True)
+                    evidence=guard.evidence(operator), proof_verified=True, audit_verified=True,
+                    continuity=continuity_results)
 
 
 if __name__ == "__main__":
@@ -218,6 +239,9 @@ if __name__ == "__main__":
         print(json.dumps(result))
     else:
         for row in result["timeline"]:
-            print(f"{row['source']:7} {row['label']}")
+            detail = ""
+            if "reads" in row:
+                detail = f" · {row['reads']} verified, max {row['max_latency_ms']} ms"
+            print(f"{row['source']:7} {row['label']}{detail}")
         print(f"PASS: recovered v{result['active_version']}; last denial {result['last_denial_ms']} ms; "
               f"recovery {result['recovery_ms']} ms")
