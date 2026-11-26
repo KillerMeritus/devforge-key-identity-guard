@@ -78,6 +78,7 @@ def event_schema(value):
     rotation = kind == "rotation" and value.get("authorization") == "allow"
     fields(value, names + (" approval_id" if rotation else "") + (" timing" if kind in TELEMETRY_KINDS else "")
            + (" credential_id" if "credential_id" in value else "")
+           + (" resource_present" if kind == "access_decision" and "resource_present" in value else "")
            + (" rule_id rule_version approval_ref" if kind == "detector_alert" else ""))
     if type(value["version"]) is not int or value["version"] != 2 or kind not in KINDS:
         raise ValueError("unsupported event schema or kind")
@@ -87,11 +88,17 @@ def event_schema(value):
         identifier(value["credential_id"])
     if value["authorization"] not in ("allow", "deny", "observed", "unavailable"):
         raise ValueError("invalid event result")
+    if "resource_present" in value and (
+        type(value["resource_present"]) is not bool
+        or (not value["resource_present"] and value["authorization"] != "deny")
+    ):
+        raise ValueError("invalid access resource state")
     if rotation:
         identifier(value["approval_id"])
-        if value["reason"] != "approved":
+        if value["reason"] not in {"approved", "version_rotated"}:
             raise ValueError("authorized rotation requires a valid approval decision")
-    if kind in CREATION_KINDS and value["authorization"] == "allow" and value["reason"] != "authorized":
+    creation_reasons = {"authorized", "enrolled"} if kind == "enrolment" else {"authorized"}
+    if kind in CREATION_KINDS and value["authorization"] == "allow" and value["reason"] not in creation_reasons:
         raise ValueError("creation requires an authorized decision")
     integer(value["received_ms"])
     sources = value["source_ids"]
@@ -173,7 +180,7 @@ def outcome_schema(outcome, pending):
         if kind == "revocation":
             old, new = next((old, new) for old, new in changes
                             if (old["kind"], old["id"]) == ("credential", event["entity_id"]))
-            if event["reason"] == "already_revoked":
+            if old["status"] == "revoked" or event["reason"] == "already_revoked":
                 if old["status"] != "revoked" or before != after:
                     raise ValueError("idempotent revocation requires unchanged revoked state")
             elif (old["status"] != "active" or new["status"] != "revoked"
@@ -224,7 +231,7 @@ def intent_projection(event, expected):
     if kind in TELEMETRY_KINDS:
         required = set()
     elif kind == "access_decision":
-        if event["authorization"] == "deny" and event["reason"] == "unknown_resource":
+        if "resource_present" not in event and event["authorization"] == "deny" and event["reason"] == "unknown_resource":
             required = caller
         else:
             required = caller | {("asset", target), ("grant", target)}
@@ -258,8 +265,11 @@ def intent_projection(event, expected):
         raise ValueError("unsupported archive operation")
     if keys != required:
         raise ValueError("intent must cover its required entity types")
-    if kind == "access_decision" and required - caller and any(entries[key]["version"] == 0 for key in required - caller):
-        raise ValueError("known-resource access requires its asset and grants")
+    if kind == "access_decision" and any(
+        (entries[key]["version"] != 0) != event.get("resource_present", True)
+        for key in required - caller
+    ):
+        raise ValueError("access must bind matching asset and grant presence")
 
 
 

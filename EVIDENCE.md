@@ -189,3 +189,27 @@ detector ingestion, and other PRD lifecycle event producers are pending.
 Archive capacity is bounded and the trusted components share one host and
 filesystem authority. Keep the 105-minute reserve for release verification,
 documentation, and rehearsal.
+
+## Follow-up to the independent review
+
+Base revision `ae5fec94a4cd7deaf09444b2b8306332ee942a01`.
+
+| Finding | Result |
+|---|---|
+| R-08 | Startup enforces the durable mode binding in both directions. A pre-provisioning SQLite restore cannot remove it. Both baseline workers serve a separately provisioned fixture. |
+| R-09 | The injected pre-commit SQLite error rolls back the open transaction. The worker verifies the preceding state, records `ABORTED`, and propagates the original error. The peer serves a subsequent authorized read. |
+| R-10 | Historical receipts preserve the working audit reason. Missing assets have separately recorded presence, a redacted reference, and typed absent asset and grant projections. |
+| R-11 | A pre-commit SIGKILL with ambiguous noncommit still leaves the archive pending and protected operations unavailable. The prototype remains experimental. |
+| R-12 | Producer grants default to one hour from provisioning. The expiry fixture exercises scoped operation recovery using a test clock. Live producer credential renewal remains outside this increment. |
+
+The supplied reviewer suite is included byte-for-byte. Run the following from
+the repository root with the pinned dependencies. The console smoke check also
+requires Playwright and Chromium.
+
+| Command | Observed result |
+|---|---|
+| `PYTHONPATH=. python tests/reviewer_worker_core.py` | Seven passed, including both real SIGKILL tests. |
+| `python -m unittest discover -s tests -v` | 49 passed with zero skips. |
+| `python /tmp/devforge-organizer-toolkit/validate.py --entry ./track4_service.py` | 22 PASS lines and `Local scenario passed.` |
+| `PYTHONPATH=. python scripts/smoke_archive_ops.py` | Passed offline provision, scoped authorization, recovery without producer credential files, verified restore, and retry. |
+| `python scripts/smoke_console.py --chromium /tmp/chromium` | Passed both baseline crash scenarios, with `v1` before commit and `v2` after commit. |

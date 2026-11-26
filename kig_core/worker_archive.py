@@ -13,6 +13,7 @@ import time
 
 from .archive import Archive, ArchiveConflict, ArchiveUnavailable, GENESIS, canonical, identifier, outcome_schema
 from .db import deadline, transaction
+from .guard import ARCHIVE_MODE, ARCHIVE_MODE_FILE
 
 
 WORKER_KINDS = ("access_decision", "enrolment", "revocation", "rotation", "evidence_access")
@@ -123,7 +124,17 @@ def private_write(path, data):
 def provision_archive(state, guard, *, producer_expires_ms=None):
     """Provision a known-good stopped fixture. Return independently scoped credentials."""
     directory = archive_directory(state)
+    working = Path(guard.path).resolve()
+    if working != (Path(state) / "demo.sqlite").resolve():
+        raise ValueError("archive must bind its own working database")
+    guard.require_mode(archive=False)
     directory.mkdir(mode=0o700)
+    private_write(directory.parent / ARCHIVE_MODE_FILE, ARCHIVE_MODE)
+    fd = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     for filename in ("receipt.key", "grant.key"):
         private_write(directory / filename, secrets.token_bytes(32))
     private_write(directory / "store.lock", b"")
@@ -140,7 +151,7 @@ def provision_archive(state, guard, *, producer_expires_ms=None):
         grants[credentials[name]] = {**common, "principal": f"worker-{node}", "role": "producer",
                                      "node": node, "subsystem": "worker",
                                      "expires_ms": producer_expires_ms if producer_expires_ms is not None else expires}
-    with store_lock(directory), guard.transaction() as db:
+    with store_lock(directory), guard.transaction(archive=True) as db:
         guard.audit(db)
         db.execute(f"CREATE TABLE {MARKER_TABLE}(pending_tag TEXT PRIMARY KEY, body BLOB, proof TEXT)")
         db.execute("CREATE TABLE archive_cutoff(singleton INTEGER PRIMARY KEY CHECK(singleton=1), seq INTEGER, tag TEXT)")
@@ -201,6 +212,9 @@ def archive_state(records, initial):
 
 class ArchivedGuard:
     def __init__(self, guard, state, node=None):
+        if Path(guard.path).resolve() != (Path(state) / "demo.sqlite").resolve():
+            raise ValueError("archive must bind its own working database")
+        guard.require_mode(archive=True)
         self.guard = guard
         self.directory = archive_directory(state)
         self.archive = open_archive(state)
@@ -267,7 +281,7 @@ class ArchivedGuard:
         if type(version) is not int:
             return None
         guard = self.guard
-        with store_lock(self.directory), guard.transaction(write=False) as db:
+        with store_lock(self.directory), guard.transaction(write=False, archive=True) as db:
             with self.archive.verified(write=False) as (archive_db, records, _, initial):
                 self.archive.authorize(archive_db, self.producer, "producer")
                 self.verify(db, records, initial)
@@ -315,28 +329,41 @@ class ArchivedGuard:
     @contextmanager
     def working_transaction(self):
         context = {}
+        rolled_back = False
+
+        def observe_rollback():
+            nonlocal rolled_back
+            rolled_back = True
+
         try:
-            with self.guard.transaction() as db:
+            with self.guard.transaction(archive=True, on_rollback=observe_rollback) as db:
                 yield db, context
-        except ControlledRollback:
-            # This path runs only after SQLite has rolled back a live transaction
-            # while this same process retained the store lock.
+        except Exception as error:
             pending = context.get("pending")
-            if pending is None:
-                raise ArchiveUnavailable("operation rolled back before archive intent") from None
-            with self.guard.transaction(write=False) as db:
-                with self.archive.verified(write=False) as (_, records, head, initial):
-                    _, _, marker = self.verify(db, records, initial, recover_pending=True)
-                    if marker is not None or head != pending["tag"]:
-                        raise ArchiveUnavailable("controlled rollback cannot be verified")
-                before = pending["expected"]
-                self.archive.finalize(self.producer, pending["tag"], {
-                    "basis": "verified_noncommit", "before": before, "after": before,
-                    "delivery": "withheld",
-                })
-                with self.archive.verified(write=False) as (_, records, _, initial):
-                    self.verify(db, records, initial)
-            raise ArchiveUnavailable("operation rolled back") from None
+            if not rolled_back or pending is None:
+                raise
+            try:
+                self.abort_rolled_back(pending)
+            except Exception as reconciliation_error:
+                error.add_note("Could not verify and record the rollback")
+                raise error from reconciliation_error
+            if isinstance(error, ControlledRollback):
+                raise ArchiveUnavailable("operation rolled back") from error
+            raise
+
+    def abort_rolled_back(self, pending):
+        with self.guard.transaction(write=False, archive=True) as db:
+            with self.archive.verified(write=False) as (_, records, head, initial):
+                _, _, marker = self.verify(db, records, initial, recover_pending=True)
+                if marker is not None or head != pending["tag"]:
+                    raise ArchiveUnavailable("controlled rollback cannot be verified")
+            before = pending["expected"]
+            self.archive.finalize(self.producer, pending["tag"], {
+                "basis": "verified_noncommit", "before": before, "after": before,
+                "delivery": "withheld",
+            })
+            with self.archive.verified(write=False) as (_, records, _, initial):
+                self.verify(db, records, initial)
 
     def execute(self, token, action, target, *, version=None, approval=None, public_key=None,
                 challenge=None, idempotency_key=None, render=None):
@@ -403,7 +430,7 @@ class ArchivedGuard:
                 raw = canonical(marker)
                 db.execute(f"INSERT INTO {MARKER_TABLE} VALUES(?,?,?)",
                            (pending["tag"], raw, self.marker_proof(raw)))
-                if event["kind"] == "revocation" and event["reason"] == "revoked" and result["allowed"]:
+                if event["kind"] == "revocation" and result["allowed"] and expected != resulting:
                     if guard.witness is not None:
                         guard.witness.advance(sequence, tag)
                 rotated = result["reason"] == "version_rotated"
@@ -411,7 +438,7 @@ class ArchivedGuard:
                     guard.checkpoint("pre")
             if rotated:
                 guard.checkpoint("committed")
-            with guard.transaction(write=False) as db:
+            with guard.transaction(write=False, archive=True) as db:
                 with self.archive.verified(write=False) as (_, records, _, initial):
                     _, _, committed = self.verify(db, records, initial, recover_pending=True)
                     if committed != marker:
@@ -432,7 +459,6 @@ class ArchivedGuard:
     def prepare_event(self, action, target, approval, token, actor, result, before, after):
         kind = WORKER_ACTIONS[action]
         allowed = result["allowed"]
-        reason = result["reason"]
         target_ref = reference(target)
         keys = set()
         caller_ref = self.guard.digest(token) if actor is not None else None
@@ -440,11 +466,10 @@ class ArchivedGuard:
             keys.add(("credential", caller_ref))
         metadata = {"credential_id": caller_ref} if caller_ref is not None else {}
         if action == "read":
-            if ("asset", target_ref) in before:
-                keys.update((("asset", target_ref), ("grant", target_ref)))
-            else:
-                reason = "unknown_resource"
+            metadata["resource_present"] = ("asset", target_ref) in before
+            if not metadata["resource_present"]:
                 target_ref = "sha256-" + digest(target.encode())
+            keys.update((("asset", target_ref), ("grant", target_ref)))
         elif action == "rotate":
             if ("asset", target_ref) not in before:
                 target_ref = "sha256-" + digest(target.encode())
@@ -453,25 +478,21 @@ class ArchivedGuard:
                 approval_ref = digest(approval.encode())
                 keys.add(("approval", approval_ref))
             if allowed:
-                reason = "approved"
                 metadata["approval_id"] = approval_ref
         elif action == "revoke":
             state = before.get(("credential", target_ref))
             if state is None:
                 target_ref = "sha256-" + digest(target.encode())
             keys.add(("credential", target_ref))
-            if allowed and state["status"] == "revoked":
-                reason = "already_revoked"
         elif action == "enroll" and allowed:
             target_ref = self.guard.digest(result["token"])
             keys.add(("credential", target_ref))
-            reason = "authorized"
         if action in {"enroll", "evidence"} and not allowed:
             target_ref = "sha256-" + digest(target.encode())
         event = {"version": 2, "event_id": result["request_id"], "request_id": result["request_id"],
                  "actor": reference(actor) if actor is not None else "anonymous",
                  "node": self.node, "subsystem": "worker", "kind": kind, "entity_id": target_ref,
-                 "authorization": "allow" if allowed else "deny", "reason": reason,
+                 "authorization": "allow" if allowed else "deny", "reason": result["reason"],
                  "received_ms": self.archive.now(), "source_ids": [], **metadata}
         if any(before.get(key) != after.get(key) for key in before.keys() | after.keys() if key not in keys):
             raise ArchiveUnavailable("unbound working-state change")
@@ -486,13 +507,13 @@ class ArchivedGuard:
 
     def authorize_recovery(self, principal, pending_tag, token, *, expires_ms):
         """Trusted offline authorization for a verified committed operation."""
-        with store_lock(self.directory), self.guard.transaction(write=False) as db:
+        with store_lock(self.directory), self.guard.transaction(write=False, archive=True) as db:
             with self.archive.verified(write=False) as (_, records, _, initial):
                 outcome = self.pending_outcome(db, records, initial, pending_tag)
             self.archive.grant_recovery(token, principal, pending_tag, outcome, expires_ms)
 
     def recover(self, token, pending_tag):
-        with store_lock(self.directory), self.guard.transaction(write=False) as db:
+        with store_lock(self.directory), self.guard.transaction(write=False, archive=True) as db:
             with self.archive.verified(write=False) as (_, records, _, initial):
                 terminal = next((r for r in records if r.get("pending_tag") == pending_tag), None)
                 if terminal is None:
@@ -507,6 +528,7 @@ class ArchivedGuard:
 
     def restore_verified(self, snapshot):
         """Restore a snapshot only if it matches the current retained state."""
+        self.guard.require_mode(archive=True)
         source = Path(snapshot).resolve()
         destination = Path(self.guard.path).resolve()
         if source == destination:

@@ -144,6 +144,12 @@ python node_server.py --archive --state "$state" --node A --port 8081
 python node_server.py --archive --state "$state" --node B --port 8082
 ```
 
+Keep `archive.required` and the archive directory outside any restore of
+`demo.sqlite`. Both workers must use `--archive` for that state directory.
+An existing archive directory also binds the mode for fixtures provisioned
+before the marker was introduced. Run the baseline from a separately
+provisioned directory with its own working database and witness.
+
 `GET /historical/{producer}/{event_id}` accepts the independently scoped
 investigator bearer credential and returns the original canonical archive event
 and its receipts. The endpoint remains available during working-store
@@ -162,11 +168,27 @@ python archive_ops.py --state "$state" restore "$verified_snapshot"
 ```
 
 The recovery and restore commands verify under the same lock used by the
-workers. If a killed worker left a pending receipt without positive evidence
-of commit or rollback, both workers return HTTP 503 for protected operations.
-Retain the stores for investigation and reconcile the pending operation with
-trusted evidence. The default demo and organizer adapter remain available for
-release verification while the opt-in archive release gates are open.
+workers. A live worker can record `ABORTED` when SQLite rolls back its open
+transaction and the preceding application state verifies. If a killed worker
+left a pending receipt without positive evidence of commit or rollback, both
+workers return HTTP 503 for protected operations. Retain the stores for
+investigation. The experimental mode currently has no reconciliation path
+for that ambiguous case.
+
+Producer credentials expire one hour after archive provisioning by default.
+Worker restarts use the original expiry. Scoped recovery can finalize a
+verified commit after producer expiry. Returning an expired producer to
+service requires credential renewal, which is outside this prototype.
+
+Run the independent reviewer and smoke checks from the repository root.
+The console smoke script uses Playwright and its installed Chromium by
+default. Use `--chromium PATH` to select an existing executable.
+
+```sh
+PYTHONPATH=. python tests/reviewer_worker_core.py
+PYTHONPATH=. python scripts/smoke_archive_ops.py
+python scripts/smoke_console.py
+```
 
 ## Submission status
 

@@ -1,10 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
+import json
 from pathlib import Path
 import secrets
 import signal
 import socket
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -12,7 +15,7 @@ from unittest.mock import patch
 
 import uvicorn
 
-from demo_cli import call, start, wait_for
+from demo_cli import WORKER, call, start, wait_for
 from kig_core.archive import Archive, ArchiveDenied, ArchiveUnavailable
 from kig_core.guard import Guard
 from kig_core.worker_archive import ArchivedGuard, open_archive, provision_archive
@@ -38,7 +41,91 @@ class ArchiveWorkerTest(unittest.TestCase):
         self.guard.seed_file("brief", b"synthetic rotation input", "reader")
         self.approvals = [self.guard.approve_rotation("operator", "brief", 1, time.time() + 120)
                           for _ in range(2)]
+        self.before_provision = self.state / "baseline-snapshot.sqlite"
+        with closing(sqlite3.connect(self.working_path)) as live, closing(
+            sqlite3.connect(self.before_provision)
+        ) as snapshot:
+            live.backup(snapshot)
         self.archive_credentials = provision_archive(self.state, self.guard)
+
+    def assert_startup_refused(self, state, node, message, *, archive=False):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        command = [sys.executable, str(WORKER), "--state", str(state), "--node", node,
+                   "--port", str(port)]
+        if archive:
+            command.append("--archive")
+        process = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(process.returncode, 1, process.stderr)
+        self.assertIn(message, process.stderr)
+
+    def test_archive_binding_refuses_baseline_worker_after_preprovision_restore(self):
+        with ExitStack() as stack:
+            a, _ = start(stack, self.state, "A", self.state / "worker-a.log", archive=True)
+            self.assertEqual(self.read(a, 1)[0], 200)
+            self.assert_startup_refused(self.state, "B", "archive enforcement required")
+        with closing(sqlite3.connect(self.before_provision)) as snapshot, closing(
+            sqlite3.connect(self.working_path)
+        ) as live:
+            snapshot.backup(live)
+        for node in ("A", "B"):
+            self.assert_startup_refused(self.state, node, "archive enforcement required")
+        with ExitStack() as stack:
+            a, _ = start(stack, self.state, "A", self.state / "stale-a.log", archive=True)
+            self.assertEqual(self.read(a, 1), (503, {"error": "audit_state_unavailable"}))
+
+    def test_older_archive_directory_still_binds_execution_mode(self):
+        (self.state / "archive.required").unlink()
+        self.assert_startup_refused(self.state, "B", "archive enforcement required")
+        with ExitStack() as stack:
+            a, _ = start(stack, self.state, "A", self.state / "worker-a.log", archive=True)
+            self.assertEqual(self.read(a, 1)[0], 200)
+
+    def test_archive_worker_refuses_separately_provisioned_baseline_state(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            baseline = Path(directory)
+            for name in ("audit", "storage", "backup"):
+                (baseline / f"{name}.key").write_bytes((self.state / f"{name}.key").read_bytes())
+            witness = baseline / "witness" / "checkpoint.sqlite"
+            witness.parent.mkdir()
+            RevocationWitness(witness, self.guard.audit_key).provision()
+            with closing(sqlite3.connect(self.before_provision)) as snapshot, closing(
+                sqlite3.connect(baseline / "demo.sqlite")
+            ) as live:
+                snapshot.backup(live)
+            self.assert_startup_refused(baseline, "A", "archive execution mode binding unavailable",
+                                        archive=True)
+            for node in ("A", "B"):
+                port, _ = start(stack, baseline, node, baseline / f"{node}.log")
+                self.assertEqual(self.read(port, 1)[0], 200)
+
+    def test_historical_denial_preserves_application_reason_and_resource_presence(self):
+        coordinator = ArchivedGuard(self.guard, self.state, "A")
+        coordinator.execute(self.supervisor, "revoke", self.guard.digest(self.reader),
+                            idempotency_key="revoke-reader")
+        for credential, reason in ((self.reader, "revoked_device"), ("invalid", "invalid_device"),
+                                   (self.operator, "missing_grant")):
+            for target, present in (("brief", True), ("unrecognized target", False)):
+                with self.subTest(reason=reason, target=target):
+                    decision = coordinator.execute(credential, "read", target, version=1)
+                    event_id = decision["request_id"]
+                    retained = coordinator.archive.retrieve(
+                        self.archive_credentials["investigator"], "worker-A", event_id,
+                    )
+                    event = json.loads(retained["event_bytes"])
+                    self.assertEqual(event["reason"], reason)
+                    self.assertEqual(event["reason"], decision["reason"])
+                    self.assertIs(event["resource_present"], present)
+                    if not present:
+                        self.assertNotEqual(event["entity_id"], target)
+                        absence = retained["intent_receipt"]["expected"]["entities"]
+                        self.assertEqual({e["kind"] for e in absence if e["version"] == 0},
+                                         {"asset", "grant"})
+                    with closing(sqlite3.connect(self.working_path)) as db:
+                        audit = self.guard.audit(db)[-1]
+                    self.assertEqual(audit["request_id"], event_id)
+                    self.assertEqual(audit["reason"], reason)
 
     def rotate(self, port, operation, approval):
         fields = {"target": "brief", "version": 1, "approval": approval}

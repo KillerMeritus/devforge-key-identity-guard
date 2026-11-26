@@ -50,7 +50,8 @@ def worker(state, node, stop_at=None, *, archive=False):
     keys = [(state / f"{name}.key").read_bytes() for name in ("audit", "storage", "backup")]
     witness = RevocationWitness(state / "witness" / "checkpoint.sqlite", keys[0])
     guard = Guard(state / "demo.sqlite", *keys, checkpoint=checkpoint, witness=witness,
-                  bootstrap=not archive)
+                  bootstrap=False)
+    guard.require_mode(archive=archive)
     api = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     def archived_guard():
@@ -197,5 +198,9 @@ if __name__ == "__main__":
     parser.add_argument("--test-stop-at", choices=["pre", "committed", "post"])
     parser.add_argument("--archive", action="store_true")
     args = parser.parse_args()
-    uvicorn.run(worker(args.state, args.node, args.test_stop_at, archive=args.archive), host="127.0.0.1",
+    try:
+        app = worker(args.state, args.node, args.test_stop_at, archive=args.archive)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"Worker startup refused: {error}\n")
+    uvicorn.run(app, host="127.0.0.1",
                 port=args.port, access_log=False, log_level="warning")

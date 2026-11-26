@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import secrets
 import time
@@ -17,6 +18,10 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from .db import enable_wal, transaction
 
 
+ARCHIVE_MODE_FILE = "archive.required"
+ARCHIVE_MODE = b"devforge-archive-v1\n"
+
+
 class Guard:
     def __init__(self, path, audit_key, storage_key, backup_key=None, checkpoint=None, *, witness=None,
                  bootstrap=True):
@@ -27,7 +32,7 @@ class Guard:
         self.witness = witness
         self.checkpoint = checkpoint or (lambda _: None)
         self.existing_only = not bootstrap
-        if self.existing_only:
+        if self.existing_only or self.archive_reserved():
             return
         enable_wal(path)
         with transaction(self.path) as db:
@@ -41,12 +46,34 @@ class Guard:
             ):
                 db.execute("CREATE TABLE IF NOT EXISTS " + ddl)
 
+    def archive_reserved(self):
+        state = Path(self.path).resolve().parent
+        return any(os.path.lexists(state / name) for name in (ARCHIVE_MODE_FILE, "archive"))
+
+    def require_mode(self, *, archive):
+        if archive:
+            marker = Path(self.path).resolve().parent / ARCHIVE_MODE_FILE
+            try:
+                mode = marker.read_bytes()
+            except FileNotFoundError as error:
+                # Older archived fixtures already reserved this external directory.
+                if not os.path.lexists(marker) and (marker.parent / "archive").is_dir():
+                    return
+                raise ValueError("archive execution mode binding unavailable") from error
+            except OSError as error:
+                raise ValueError("archive execution mode binding unavailable") from error
+            if mode != ARCHIVE_MODE:
+                raise ValueError("invalid archive execution mode binding")
+        elif self.archive_reserved():
+            raise ValueError("archive enforcement required for this state directory")
+
     @contextmanager
-    def transaction(self, *, write=True):
+    def transaction(self, *, write=True, archive=False, on_rollback=None):
         path = self.path
         if self.existing_only:
             path = Path(path).resolve().as_uri() + ("?mode=rw" if write else "?mode=ro")
-        with transaction(path, write=write, uri=self.existing_only) as db:
+        with transaction(path, write=write, uri=self.existing_only, on_rollback=on_rollback) as db:
+            self.require_mode(archive=archive)
             if self.witness is not None:
                 self.witness.check(db)
             yield db
