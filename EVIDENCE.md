@@ -36,3 +36,18 @@ survives. Node A and Node B withhold reads and signed evidence. Restoring
 the current database allows the teammate to read and leaves the laptop
 revoked. Separate cases cover a missing or altered witness, and failure
 after the witness commits but before the file database commits.
+
+## Archive acceptance gate
+
+Run the opt-in baseline fixture from the repository root:
+
+```sh
+TRACK4_ARCHIVE_ACCEPTANCE=1 python -m unittest discover -s tests -p test_rollback.py -k post_revocation_restore -v
+```
+
+On the runtime at `ca94e31`, both nodes returned HTTP 200 for the
+authorized read and the fresh attestation after a restore that retained
+the revocation but lost a later unauthorized rotation attempt. The
+fixture expected HTTP 503 in all four cases. The current-state restore
+checks passed inside the same run. Archived historical retrieval is a
+separate pending assertion to add once investigator access exists.

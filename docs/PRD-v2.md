@@ -220,7 +220,7 @@ stores remain outside this guarantee.
 | FR‑14 | Retain each scoped security event durably outside the working database. Include authenticated access decisions and denials, enrolment, revocation, approval consumption, rotation, evidence-access actions, and detector alerts included in the demo. Use an explicit schema to exclude credentials, key material, and plaintext. | Retrieve the original event by request or event ID after local restore. Verify both positive evidence and redaction. Pre-authentication malformed requests, health probes, and process stdout are outside retained event scope. |
 | FR‑15 | Bind the retained position to a provisioned store identity, monotonic sequence, and authenticated digest. Detect stale, conflicting, missing, or unverifiable archive state. | A restore after revocation but before a later suspicious event leaves the laptop revoked and both nodes return unavailable for protected operations. The archive independently returns the later event. |
 | FR‑16 | Define durability at acknowledgement. Protected reads must withhold content if their required evidence cannot be retained. Critical mutations require a durable receipt before success. Use a stable operation ID across retries and prevent conflicting duplicates. | Inject lost replies and failures at each write boundary. A retry produces the same logical record or an explicit conflict. A crash cannot create a false completed outcome. |
-| FR‑17 | Distinguish incomplete operations from committed outcomes across the two stores. Track pending, confirmed, and unresolved states. Reconciliation must compare trusted records and the working transaction state before restoring access. | Interrupt before archive write, after pending receipt, after working commit, and after archive confirmation but before reply. No ambiguous state authorizes protected access. |
+| FR‑17 | Distinguish incomplete operations from committed outcomes across the two stores. Track PENDING, CONFIRMED, ABORTED, and UNRESOLVED states. Reconciliation must compare trusted records and the working transaction state before restoring access. | Interrupt before archive write, after pending receipt, after working commit, and after archive confirmation but before reply. No ambiguous state authorizes protected access. |
 | FR‑18 | Gate evidence access and signing by active authorization and state verification. Preserve node identity, signed payload, and request binding. Provide a deliberately scoped investigator path for retained historical evidence while the working store is blocked. | Unprivileged and revoked identities cannot query or sign. Stale working state cannot mint accepted fresh evidence. Authorized investigators can retrieve the retained original and verify provenance. |
 | FR‑19 | Show three distinct outcomes in CLI and console: explicit policy denial, audit state unavailable, and verified historical evidence. | Reproduce the user's case with evidence IDs and distinguish unavailable from no suspicious activity. |
 | FR‑20 | Keep a release evidence manifest keyed by exact Git SHA and tool version. Capture public validator, local tests, both browser scenarios, synthetic replay, and the restore scenario. | A second person can rerun each command and locate the relevant trace. Store a compact redacted milestone report. Operational audit persistence and test-output retention have separate purposes. |
@@ -275,7 +275,7 @@ Existing feature regressions remain mandatory.
 | Restore after revocation, before later suspicious event | Both nodes report stale or unverifiable audit state. Investigator retrieves the later original with its ID, provenance, and rule context. |
 | Truncated tail; deleted or edited middle event; changed head; valid-looking conflicting history | Detect the missing or inconsistent position. Block fresh signatures based on stale state. Preserve independently retained evidence. |
 | Missing archive, timeout, invalid receipt, or archive at capacity | No protected content or successful critical acknowledgement. Distinguish unavailable from revoked. Restore availability only after verification. |
-| Process interruption at each write boundary | Each operation resolves as confirmed, pending, or unresolved. No false success. Repeated requests do not advance the sequence twice or mutate state twice. |
+| Process interruption at each write boundary | Each operation is classified as PENDING, CONFIRMED, ABORTED, or UNRESOLVED using the recovery table in Section 12. No false success. Repeated requests do not advance the sequence twice or mutate state twice. |
 | Concurrent writers and out-of-order retries | One canonical history, authenticated predecessor linkage, no substituted event or cross-node signature, and controlled contention handling. |
 | Archive edit/delete attempted through application-facing API | Denied. Read-only investigator credential cannot append. Revoked application operator cannot use stale claims to retrieve evidence. |
 | Restore both stores, invalid trust root, or shared-host compromise | Demonstrate or document the resulting limit. Make no claims of independent physical storage or immutable retention against host administrators. |
@@ -366,6 +366,91 @@ marker containing that binding in the same SQLite transaction as the mutation.
 Verify it against the confirmed receipt. Preserve this marker across normal
 retries. Audit position alone does not prove a working-state change.
 
+### Local archive interface for the first implementation
+
+| Operation | Input and outcome |
+|---|---|
+| Read verified position | A configured store identity and pinned archive verifier. Return the authenticated confirmed position and any outstanding intent. Unknown or inconsistent history is unavailable. |
+| Append intent | Authenticated producer, scoped operation ID, canonical intent, expected predecessor, and deadline. Return a durable authenticated pending receipt only after append. An exact duplicate receives its existing receipt. A mismatched duplicate or predecessor receives conflict. |
+| Finalize intent | Reference the exact pending receipt and provide an authenticated outcome binding. A confirm requires independently checked persisted state and commit marker at the worker boundary. An abort requires verified noncommit evidence. Return the existing terminal receipt for an exact retry. |
+| Retrieve retained event | A currently authorized archive investigator, scope, and event ID. Return the original canonical bytes and retained provenance. Working-store state is not an authentication input. |
+
+These are internal local interfaces, with a separate investigator entry
+point to be implemented after worker enforcement. The organizer adapter
+and baseline CLI do not depend on them. Add the investigator assertion to
+the opt-in rollback fixture before the gate can be called passing. The
+first fixture exercises stale reads and fresh attestations and records
+their baseline failure in `EVIDENCE.md`.
+
+### Verify persisted state before accepting a receipt
+
+A verified receipt and matching SQLite marker establish which change was
+intended. They do not prove the database currently contains that change.
+For each affected entity, compare the receipt’s expected projection with
+a fresh query of the actual rows in one protected SQLite snapshot. Bind
+the projection kind and version to the digest. Confirm the pre-state
+against the verified preceding position and the post-state against the
+committed transaction. When later mutations supersede an old receipt,
+verify the latest confirmed projection for each affected entity and
+follow the authenticated predecessor links for history. Never compare an
+obsolete post-state directly to a legitimately updated entity. Missing,
+additional, or mismatched rows in the defined projection are unverifiable.
+
+| Mutation | Canonical non-secret working-state projection |
+|---|---|
+| Enrol or revoke a device | Device reference, actor reference, role, enabled/revoked state, credential generation, and any predecessor/replacement reference. Verify the actual credential row and the persisted relationship. Exclude bearer secrets. |
+| Change roles or grants | Actor reference, policy version, and complete sorted affected role/grant set with action, scope, and validity. Verify row deletion explicitly as absence within verified state. |
+| Issue or consume approval | Approval reference, subject, target, exact scope, file version, validity, and issuance/consumption state. A consumed approval is absent from the live approval table and bound to its verified operation marker. |
+| Rotate or restore file state | Asset reference, active version, key identifier, digest of persisted authenticated ciphertext, and approval reference/consumption when applicable. Verify the active row and corresponding approval state without exporting content or keys. |
+| Change trust or investigator grants | These changes belong to the independently authorized archive store. Verify persisted store identity, key identifier/epoch, and scoped grant status/expiry there. Working-store data cannot change these grants. |
+
+A negative integration test must preserve the genuine receipt and marker,
+change the actual projected rows in a private fixture, and verify that the
+worker withholds protected operations. A marker is never an authorization
+source. Protected reads evaluate current credential, grant, and asset state.
+
+### Cross-process serialization
+
+Use a stable, provisioned POSIX advisory lock file for each store pair.
+Both workers and the trusted offline restore tool must acquire the same
+lock. The current owner is the process holding the open lock descriptor.
+Never delete or replace the lock file to clear contention. Take the process
+lock first, then the working SQLite transaction, then archive I/O. Archive
+handlers must not acquire the working lock or call back into a worker.
+Hold the lock through the final durable receipt and the working-state
+verification that gates the response. Use a five-second acquisition deadline
+in the demo, with SQLite and archive I/O bounded by the remaining deadline.
+On timeout return unavailable with no protected content or success result.
+
+OS process exit releases the lock, but release of a lock is never proof
+of a commit or abort. The next owner verifies both stores and resolves
+the recorded state before serving. A successful local rollback observed
+under the live lock can justify ABORTED. A process kill with missing
+working evidence is UNRESOLVED unless a separate trusted noncommit proof
+exists. In particular, an authenticated old snapshot can look identical
+to a pre-commit crash. Do not infer ABORTED from a missing marker there.
+
+Keep the existing crash workflow independently runnable. Prepare new
+ciphertext outside the process lock, recheck the version after acquiring
+it, and release it after the confirmed receipt and before the post-commit
+test pause. Preserve and measure Node B reads during preparation and after
+the confirmed commit before reply. Reads may wait during the brief write
+section. Archive-enabled crash recovery remains a release gate. If the
+prototype cannot distinguish verified noncommit from unknown state and
+meet its required recovery outcomes, keep it disabled for release.
+
+### Historical evidence and fresh attestations
+
+A retained signature can verify historical origin and content. Display its
+original signing context, event ID, and retained sequence. It does not
+establish present freshness or grant access. An investigator may obtain this
+historical evidence while workers are unavailable only through the archive
+authority’s separately provisioned, current scoped credential. The stale
+working database cannot authorize that request. A fresh current-state
+attestation requires a new challenge, a pinned node key, active current
+authorization, and verified working/archive state. A receipt mismatch,
+missing archive, or UNRESOLVED operation blocks fresh successful signing.
+
 ### Retries, ordering, and access
 
 - Scope idempotency keys to authenticated principal, endpoint, and operation
@@ -410,7 +495,7 @@ links as each change lands.
 | Invariant | Planned code boundary | Acceptance test |
 |---|---|---|
 | IR‑1 No stale protected access | Worker guard and archive position verifier | Restore between revocation and a later event; both nodes refuse and investigator retrieves the event. |
-| IR‑2 A receipt proves the intended state change | Guard transaction marker and archive finalization | A valid receipt for the wrong target, version, or state digest fails; process kills cover each boundary. |
+| IR‑2 A receipt proves the intended state change | Guard transaction marker and archive finalization | A valid receipt for the wrong target, version, or state digest fails. A genuine marker and receipt with changed persisted rows also fail. Process kills cover each boundary. |
 | IR‑3 Retries do not disclose secrets or repeat mutations | Worker auth, idempotency state, issuance | Lost reply, revoked caller, divergent intent, and no read or enrolment secret replay. |
 | IR‑4 Retained history resolves provenance | Canonical event writer, detector ingestion, node attestation | Duplicate/conflicting IDs, bounded and ambiguous timing, source retrieval, wrong signing key and replayed challenge. |
 | IR‑5 Investigation is independently authorized | Archive investigator interface | Fresh, expired, revoked, and scoped credentials against stale working state. |

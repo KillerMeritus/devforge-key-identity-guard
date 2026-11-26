@@ -1,4 +1,5 @@
 from contextlib import ExitStack, closing
+import os
 from pathlib import Path
 import secrets
 import sqlite3
@@ -63,6 +64,62 @@ class RollbackTest(unittest.TestCase):
                 port, _ = start(stack, self.state, node, self.state / f"current-{node}.log")
                 self.assertEqual(call(port, "read", self.teammate, fields)[0], 200)
                 self.assertEqual(call(port, "read", self.laptop, fields)[1]["reason"], "revoked_device")
+
+    @unittest.skipUnless(os.environ.get("TRACK4_ARCHIVE_ACCEPTANCE") == "1",
+                         "archive enforcement is pending")
+    def test_post_revocation_restore_with_later_evidence_is_blocked(self):
+        fields = {"target": "brief", "version": 1}
+        original = self.state / "after-revocation.sqlite"
+        current = self.state / "with-later-evidence.sqlite"
+        nodes = ("A", "B")
+        for node in nodes:
+            (self.state / f"attestation-{node}.key").write_bytes(secrets.token_bytes(32))
+
+        with ExitStack() as stack:
+            ports = {node: start(stack, self.state, node, self.state / f"{node}.log")[0]
+                     for node in nodes}
+            status, _, _ = call(ports["A"], "revoke", self.admin,
+                                {"target": self.guard.digest(self.laptop)})
+            self.assertEqual(status, 200)
+            denials = {}
+            for node, port in ports.items():
+                status, denial, _ = call(port, "read", self.laptop, fields)
+                self.assertEqual(status, 403)
+                self.assertEqual(denial["reason"], "revoked_device")
+                denials[node] = denial["request_id"]
+            copy_database(self.path, original)
+            status, later, _ = call(ports["B"], "rotate", self.teammate, fields)
+            self.assertEqual(status, 403)
+            self.assertEqual(later["reason"], "action_forbidden")
+            preserved_event = f"evidence/{later['request_id']}"
+            self.assertEqual(call(ports["B"], preserved_event, self.admin)[0], 200)
+
+        copy_database(self.path, current)
+        copy_database(original, self.path)
+        with ExitStack() as stack:
+            for node in nodes:
+                port, _ = start(stack, self.state, node, self.state / f"stale-{node}.log")
+                with self.subTest(node=node, operation="authorized read"):
+                    status, body, _ = call(port, "read", self.teammate, fields)
+                    self.assertEqual(status, 503)
+                    self.assertNotIn("body", body)
+                with self.subTest(node=node, operation="fresh signature"):
+                    status, body, _ = call(
+                        port, f"evidence/{denials[node]}/attestation", self.admin,
+                        {"challenge": secrets.token_hex(32)},
+                    )
+                    self.assertEqual(status, 503)
+                    self.assertNotIn("signature", body)
+
+        copy_database(current, self.path)
+        with ExitStack() as stack:
+            for node in nodes:
+                with self.subTest(node=node, operation="verified current restore"):
+                    port, _ = start(stack, self.state, node, self.state / f"current-{node}.log")
+                    self.assertEqual(call(port, "read", self.teammate, fields)[0], 200)
+                    self.assertEqual(call(port, "read", self.laptop, fields)[1]["reason"],
+                                     "revoked_device")
+                    self.assertEqual(call(port, preserved_event, self.admin)[0], 200)
 
     def test_missing_witness_is_unavailable_and_never_recreated(self):
         with ExitStack() as stack:
