@@ -29,6 +29,10 @@ class RetryDenied(PermissionError):
     pass
 
 
+class PendingRecovery(ArchiveUnavailable):
+    """Verified archive head is pending an operator recovery decision."""
+
+
 class ControlledRollback(RuntimeError):
     """Signal a deliberate live rollback before the working commit."""
 
@@ -228,7 +232,7 @@ class ArchivedGuard:
         latest, confirmed = archive_state(records, initial)
         pending = records[-1] if records and records[-1]["state"] == "PENDING" else None
         if pending and not recover_pending:
-            raise ArchiveUnavailable("unresolved pending operation")
+            raise PendingRecovery("unresolved pending operation")
         cutoff = db.execute("SELECT seq,tag FROM archive_cutoff WHERE singleton=1").fetchone()
         if cutoff is None or anchor(cutoff) != latest.pop(ANCHOR, None):
             raise ArchiveUnavailable("working archive cutoff mismatch")
@@ -417,7 +421,10 @@ class ArchivedGuard:
                 context["pending"] = pending
                 outcome_schema(outcome, pending)
                 sequence, tag = guard.record(db, dict(
-                    node=self.node, actor=actor, role=role, action=action, target=target,
+                    node=self.node, actor=actor, role=role, action=action,
+                    target=guard.audit_target(db, action, target),
+                    credential_ref=guard.audit_target(db, "credential", guard.digest(token))
+                    if identity else None,
                     timestamp=time.time(), allowed=result["allowed"],
                     decision="allow" if result["allowed"] else "deny", reason=result["reason"],
                     request_id=request_id, version=result.get("version", version),

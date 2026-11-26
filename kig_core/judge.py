@@ -51,6 +51,7 @@ def setup(path, request):
         db.execute("CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY, owner TEXT, body TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS revoked(actor TEXT PRIMARY KEY)")
         db.execute("CREATE TABLE IF NOT EXISTS decisions(id TEXT PRIMARY KEY, decision TEXT)")
+        db.execute("CREATE TABLE IF NOT EXISTS decision_binding(id TEXT PRIMARY KEY, actor TEXT, asset TEXT)")
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='initialized'").fetchone():
             return {"error": "already_initialized"}
         db.execute("CREATE TABLE initialized(marker INTEGER)")
@@ -69,7 +70,17 @@ def dispatch(path, request):
         with transaction(path) as db:
             body = lookup(db, actor, asset)
             decision = "deny" if body is None else "allow"
-            db.execute("INSERT INTO decisions VALUES (?,?) ON CONFLICT(id) DO UPDATE SET decision=excluded.decision", (request_id, decision))
+            db.execute("CREATE TABLE IF NOT EXISTS decision_binding(id TEXT PRIMARY KEY, actor TEXT, asset TEXT)")
+            recorded = db.execute(
+                "SELECT d.decision, b.actor, b.asset FROM decisions d "
+                "LEFT JOIN decision_binding b ON d.id=b.id WHERE d.id=?", (request_id,),
+            ).fetchone()
+            if recorded is not None:
+                if recorded != ("allow", actor, asset):
+                    return DENY
+            else:
+                db.execute("INSERT INTO decisions VALUES (?,?)", (request_id, decision))
+                db.execute("INSERT INTO decision_binding VALUES (?,?,?)", (request_id, actor, asset))
         return DENY if body is None else {"decision": "allow", "body": body}
     if op == "revoke":
         actor, = strings(request, "actor")

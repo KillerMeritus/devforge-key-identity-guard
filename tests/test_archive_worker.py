@@ -173,7 +173,7 @@ class ArchiveWorkerTest(unittest.TestCase):
             for port in (a, b):
                 status, result = self.read(port, 1)
                 self.assertEqual(status, 503)
-                self.assertNotIn("body", result)
+                self.assertEqual(result, {"error": "recovery_pending"})
             self.assertEqual(self.rotate(a, operation, self.approvals[0])[0], 503)
             archive = open_archive(self.state)
             with archive.verified(write=False) as (_, records, _, _):

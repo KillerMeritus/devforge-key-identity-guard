@@ -82,8 +82,11 @@ byId('run').addEventListener('click', () => {
       const observation = nodes[node];
       const denied = observation.revoked_status === 403 && observation.revoked_reason === 'revoked_device';
       text('node' + node, observation.health === 200 && denied ? 'Revocation verified' : 'See observed result');
+      const old = result.cutoff[node];
       text('details' + node, 'Health ' + observation.health + ' · Teammate ' +
-        observation.teammate_status + ' · Revoked device ' + observation.revoked_status);
+        observation.teammate_status + ' · Revoked device ' + observation.revoked_status +
+        (old ? ' · v' + old.requested_version + ' rejected with HTTP ' + old.status +
+          ' in ' + old.observed_ms + ' ms' : ''));
     });
     measured('revocation', allNodes.every(node =>
       nodes[node].revoked_status === 403 && nodes[node].revoked_reason === 'revoked_device'));
@@ -121,9 +124,10 @@ byId('run-detection').addEventListener('click', () => {
     }
     for (const item of result.findings) {
       const kind = item.event.detector_context.classification === 'policy_violation' ? 'Violation' : 'Investigate';
-      row('detections', kind, item.event.rule_id.replaceAll('_', ' '), () =>
+      row('detections', kind, item.event.actor + ' · ' + item.event.rule_id.replaceAll('_', ' '), () =>
         showEvidence(item.event.rule_id.replaceAll('_', ' '), {
-          ...item.event, services: item.services, receipt: item.receipt,
+          ...item.event, explanation: item.explanation, services: item.services,
+          service_edges: item.service_edges, uncertainty_ms: item.uncertainty_ms, receipt: item.receipt,
           sources: item.event.source_ids.map(ref => ({ ...ref, observation: sources.get(ref.event_id), receipt: result.source_receipts[ref.event_id] }))
         }));
     }

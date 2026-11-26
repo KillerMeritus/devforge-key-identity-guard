@@ -200,7 +200,22 @@ def run(phase):
         require(not reconnect.done(), "rotation finished before the preparation probe")
         (state / "resume-rotation").touch()
         wait_for(lambda: f"CHECKPOINT {phase}" in log.read_text().splitlines(), f"{phase}-commit checkpoint")
+        cutoff = {}
         if phase == "post":
+            observed_commit = next(int(line.split()[1]) for line in log.read_text().splitlines()
+                                   if line.startswith("COMMIT_OBSERVED_NS "))
+
+            def rejected_old_version(port):
+                status, result = read(port, teammate, 1)
+                elapsed_ms = (time.monotonic_ns() - observed_commit) / 1_000_000
+                require(status == 403 and result["reason"] == "wrong_version", "old version accepted")
+                return {"status": status, "reason": result["reason"], "requested_version": 1,
+                        "request_id": result["request_id"], "observed_ms": round(elapsed_ms, 2)}
+
+            probes = {node: pool.submit(rejected_old_version, port) for node, port in (("A", a), ("B", b))}
+            cutoff = {node: future.result() for node, future in probes.items()}
+            for node, result in cutoff.items():
+                event(node, "Old key version rejected", version=1, **result)
             continuity_results["committed"] = continuity(2, "Teammate reads after commit before rotation reply")
             require(not reconnect.done(), "rotation replied before the post-commit probe")
         event("Harness", f"Reached {phase}-commit checkpoint")
@@ -232,7 +247,9 @@ def run(phase):
                                         revoked_reason=result["reason"], revoked_request_id=revoked_request_id)
             event(name, "Revocation survived restart", request_id=revoked_request_id)
             if phase == "post":
-                require(read(port, teammate, 1)[1]["reason"] == "wrong_version", "old version accepted")
+                old_status, old_result = read(port, teammate, 1)
+                require(old_status == 403 and old_result["reason"] == "wrong_version", "old version accepted")
+                observed_nodes[name]["old_version_status"] = old_status
             challenge = secrets.token_hex(32)
             route = f"evidence/{revoked_request_id}/attestation"
             require(call(port, route, teammate, {"challenge": challenge})[0] == 403,
@@ -265,7 +282,8 @@ def run(phase):
         return dict(checkpoint=phase, active_version=expected, timeline=timeline,
                     last_denial_ms=round(max(timings.values()), 2), recovery_ms=round(recovery_ms, 2),
                     evidence=guard.evidence(operator), proof_verified=True, audit_verified=True,
-                    continuity=continuity_results, nodes=observed_nodes)
+                    continuity=continuity_results, nodes=observed_nodes, cutoff=cutoff,
+                    revocation_ms={node: round(delay, 2) for node, delay in timings.items()})
 
 
 if __name__ == "__main__":

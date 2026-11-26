@@ -50,6 +50,9 @@ def main():
                             break
                     else:
                         raise AssertionError("No verified audit evidence displayed")
+                    if phase == "post":
+                        for node in ("A", "B"):
+                            expect(page.locator("#details" + node)).to_contain_text("v1 rejected with HTTP 403")
                     for check in ("revocation", "access", "audit"):
                         expect(page.locator("#check-" + check)).to_have_text("PASS")
                     page.evaluate("window.scrollTo(0, 0)")
@@ -62,6 +65,7 @@ def main():
                 expect(page.locator("#detections")).to_contain_text("order uncertain")
                 page.locator("#detections .event").first.click()
                 expect(page.locator("#evidence")).to_contain_text("policy_violation")
+                expect(page.locator("#evidence")).to_contain_text("explanation")
                 expect(page.locator("#evidence")).to_contain_text("CONFIRMED")
                 page.locator("#evidence-panel").scroll_into_view_if_needed()
                 capture("detection")

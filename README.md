@@ -5,7 +5,8 @@ two local workers and key rotation recovery across a real process kill.
 
 ## Setup
 
-Use Linux and Python 3.12. Create a virtual environment and install the
+Use Linux and Python 3.12. This release was verified on x86_64 with Python
+3.12.14. From a clean checkout, create a virtual environment and install the
 pinned dependencies. For offline setup, stage compatible wheels first,
 then use pip with `--no-index --find-links /path/to/wheelhouse`.
 
@@ -13,8 +14,11 @@ then use pip with `--no-index --find-links /path/to/wheelhouse`.
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
+python -m pip check
 git clone https://github.com/ScalerOpenSourceLabs/Track-4-Toolkit.git ../Track-4-Toolkit
-python ../Track-4-Toolkit/validate.py --entry ./track4_service.py
+toolkit_dir="$PWD/../Track-4-Toolkit"
+git -C "$toolkit_dir" checkout --detach 8901dfb
+PYTHONDONTWRITEBYTECODE=1 python "$toolkit_dir/validate.py" --entry ./track4_service.py
 python -m unittest discover -s tests -v
 ```
 
@@ -22,8 +26,13 @@ The toolkit used during development was commit `8901dfb`. Keep it separate
 from the submission. The judge import path uses Python's standard library
 and the organizer's `pqcrypto`. FastAPI, Uvicorn, and cryptography are
 demo dependencies. The judge gets its own writable state directory and
-does not import the HTTP server. Its audit lookup covers ordinary reads
-keyed by the organizer's request ID. The demo worker separately records
+does not import the HTTP server. The source tree can be read-only after setup.
+Set `TRACK4_STATE_DIR` to an isolated writable directory when invoking the
+adapter directly. When unset, the adapter uses an OS temporary directory.
+Demo and test fixtures independently allocate writable temporary state.
+No manual credentials or configuration files are needed for these commands.
+The organizer audit lookup covers ordinary reads keyed by request ID. A
+conflicting request cannot overwrite the first decision. The demo worker separately records
 protected-read decisions in its authenticated audit chain.
 
 ## Stages and human checks
@@ -234,3 +243,37 @@ consume live worker traffic. It retains synthetic or organizer practice event
 fields, so keep the entire state directory private, including its credential
 files. Archive receipts authenticate record provenance within this fixture.
 Portable historical ML-DSA evidence and producer renewal remain out of scope.
+
+
+## Release verification
+
+After setup, run these checks from the repository root. Set `toolkit_dir`
+to the path of the pinned toolkit checkout if it is stored elsewhere.
+
+```sh
+PYTHONPATH=. python tests/reviewer_worker_core.py
+python demo_cli.py --kill-at pre --json
+python demo_cli.py --kill-at post --json
+PYTHONPATH=. python scripts/smoke_archive_ops.py
+PYTHONPATH=. python scripts/evaluate_detector.py --baseline 4f75ed2
+PYTHONPATH=. python scripts/measure_rubric.py --practice "$toolkit_dir/practice"
+```
+
+For the browser smoke check, install Playwright and its Chromium separately
+from the judging dependencies.
+
+```sh
+python -m pip install playwright==1.62.0
+python -m playwright install chromium
+python scripts/smoke_console.py --screenshots "$PWD/../devforge-screenshots"
+```
+
+If Chromium is already installed, pass `--chromium /path/to/chromium`.
+The local console binds to 127.0.0.1 on port 8080. Other fixture processes
+use temporary state and ephemeral ports.
+
+- [Project overview](PROJECT_OVERVIEW.md)
+- [Official objective coverage](OBJECTIVE_COVERAGE.md)
+- [Measured results](METRICS.md)
+- [Judge demo guide](JUDGE_DEMO_GUIDE.md) and [technical Q&A](JUDGE_QA.md)
+- [Evidence and acceptance](EVIDENCE.md)

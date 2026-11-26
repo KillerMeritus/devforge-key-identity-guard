@@ -7,15 +7,12 @@ import statistics
 import time
 
 from .archive import Archive, ArchiveConflict, canonical
-from .detector import UNCERTAINTY_SECONDS, analyze, approved, corrected, timestamp
+from .detector import RULE_DETAILS, UNCERTAINTY_SECONDS, analyze, approved, corrected, timestamp
 from .worker_archive import private_write
 
 PRODUCER = "replay-detector"
 KINDS = ("detector_source", "detector_alert")
-VIOLATIONS = {"unexpected_role_change", "access_outside_approval"}
-RULE_VERSION = {"unexpected_role_change": 1, "access_outside_approval": 1,
-                "review_after_role_change": 1, "lateral_movement_candidate": 1,
-                "unexpected_allowed_access": 1}
+
 
 
 def evidence_archive(directory):
@@ -116,6 +113,7 @@ def replay(archive, writer, investigator, events, approvals):
     findings = []
     for alert in alerts:
         anchor, rule = alert["anchor_event_id"], alert["rule"]
+        version, classification, explanation = RULE_DETAILS[rule]
         source = retained[anchor]
         evidence = [retained[eid] for eid in alert["evidence_event_ids"]]
         approval, proof, snapshot = approval_context(unique[anchor], approvals)
@@ -124,9 +122,9 @@ def replay(archive, writer, investigator, events, approvals):
             **envelope(event_id, source["actor"], "detector_alert", rule,
                        max(item["received_ms"] for item in evidence), source["timing"]["corrected_ms"]),
             "source_ids": [{"producer": PRODUCER, "event_id": item["event_id"]} for item in evidence],
-            "rule_id": rule, "rule_version": RULE_VERSION[rule], "approval_ref": unique[anchor]["approval_id"] or None,
+            "rule_id": rule, "rule_version": version, "approval_ref": unique[anchor]["approval_id"] or None,
             "detector_context": {
-                "classification": "policy_violation" if rule in VIOLATIONS else "investigate",
+                "classification": classification,
                 "approval_status": approval, "approval_digest": proof, "approval": snapshot,
             },
         }
@@ -135,7 +133,9 @@ def replay(archive, writer, investigator, events, approvals):
         if receipt["lifecycle"] != "CONFIRMED" or receipt["event_bytes"] != canonical(derived):
             raise ArchiveConflict("detector alert receipt did not verify")
         findings.append({"event": derived, "receipt": receipt["terminal_receipt"],
-                         "anchor_event_id": anchor, "services": alert["services"]})
+                         "anchor_event_id": anchor, "services": alert["services"],
+                         "service_edges": [list(edge) for edge in alert["service_edges"]],
+                         "explanation": explanation, "uncertainty_ms": alert["uncertainty_ms"]})
     ingestion_ms.sort()
     return {
         "findings": findings, "timing_notes": notes, "sources": list(retained.values()),

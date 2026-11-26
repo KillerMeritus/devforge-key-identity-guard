@@ -7,7 +7,9 @@ import sys
 import time
 
 from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
+from cryptography.exceptions import InvalidTag
 from fastapi import FastAPI, Header
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictInt
 import uvicorn
@@ -17,15 +19,15 @@ from kig_core.archive import ArchiveConflict, ArchiveDenied, ArchiveUnavailable
 from kig_core.detector import LATENESS_SECONDS
 from kig_core.guard import Guard
 from kig_core.witness import RevocationWitness
-from kig_core.worker_archive import ArchivedGuard, MUTATIONS, RetryDenied, open_archive
+from kig_core.worker_archive import ArchivedGuard, MUTATIONS, PendingRecovery, RetryDenied, open_archive
 
 
 class Request(BaseModel):
-    target: str
+    target: str = Field(max_length=128)
     version: StrictInt | None = None
-    approval: str | None = None
-    public_key: str | None = None
-    challenge: str | None = None
+    approval: str | None = Field(default=None, max_length=128)
+    public_key: str | None = Field(default=None, max_length=2048)
+    challenge: str | None = Field(default=None, max_length=1024)
 
 
 class AttestationRequest(BaseModel):
@@ -43,6 +45,8 @@ def worker(state, node, stop_at=None, *, archive=False):
                     raise RuntimeError("Rotation preparation checkpoint expired")
                 time.sleep(0.01)
         if phase == stop_at:
+            if phase == "post":
+                print(f"COMMIT_OBSERVED_NS {time.monotonic_ns()}", flush=True)
             print(f"CHECKPOINT {phase}", flush=True)
             while True:
                 time.sleep(60)
@@ -62,15 +66,24 @@ def worker(state, node, stop_at=None, *, archive=False):
 
     def token(header):
         scheme, _, value = (header or "").partition(" ")
-        return value if scheme.lower() == "bearer" else ""
+        return value if scheme.lower() == "bearer" and len(value) <= 256 else ""
 
     @api.exception_handler(sqlite3.Error)
     def database_error(_, __):
         return JSONResponse({"error": "state_unavailable"}, status_code=503)
 
+    @api.exception_handler(RequestValidationError)
+    def invalid_request(_, __):
+        return JSONResponse({"error": "invalid_request"}, status_code=422)
+
+    @api.exception_handler(InvalidTag)
     @api.exception_handler(ValueError)
     def evidence_error(_, __):
         return JSONResponse({"error": "verification_failed"}, status_code=503)
+
+    @api.exception_handler(PendingRecovery)
+    def recovery_pending(_, __):
+        return JSONResponse({"error": "recovery_pending"}, status_code=503)
 
     @api.exception_handler(ArchiveUnavailable)
     @api.exception_handler(OSError)
@@ -173,6 +186,8 @@ def worker(state, node, stop_at=None, *, archive=False):
         if action not in {"read", "revoke", "rotate", "enroll"}:
             return JSONResponse({"error": "unsupported_route"}, status_code=404)
         if archive:
+            if idempotency_key and len(idempotency_key) > 128:
+                return JSONResponse({"error": "invalid_request"}, status_code=422)
             if action in MUTATIONS and not idempotency_key:
                 return JSONResponse({"error": "idempotency_key_required"}, status_code=400)
             try:

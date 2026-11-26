@@ -241,3 +241,24 @@ clock uncertainty come from the existing detector and its input context.
 This is replay integration in a separate archive, with a bounded capacity.
 Live worker ingestion, R-11 automatic reconciliation, R-12 credential
 renewal, portable historical signatures, and messaging remain open.
+
+## Rubric sprint verification
+
+Use the [README release verification](README.md#release-verification) with
+the pinned organizer toolkit. The [objective matrix](OBJECTIVE_COVERAGE.md)
+maps the twelve official objectives to source, tests and limits.
+[METRICS.md](METRICS.md) records the measured cohort and boundaries.
+
+| Property | Verification path |
+|---|---|
+| Authorization and input handling | `tests/test_security_matrix.py` checks missing credentials and reader role across file reads, operator mutations, evidence and attestation, in both worker modes. |
+| Approval binding and version cutoff | The security matrix exercises wrong actor, asset and version, expired approval and single use. `demo_cli.py --kill-at post` observes both HTTP 403 old-version responses after commit. |
+| Revocation, concurrency and interruption | `tests/test_demo.py`, `tests/test_rollback.py`, `tests/test_archive_worker.py`, and both CLI boundaries. |
+| Evidence integrity and secret omission | The security matrix checks a single canonical denial from synthetic multiline input, sanitized validation, corrupted ciphertext and tampered audit history. `tests/test_node_routes.py` checks attestation authorization and payload, node, challenge and key binding. |
+| Pending and independently authorized recovery | `tests/test_archive_worker.py`, `tests/reviewer_worker_core.py` and `scripts/smoke_archive_ops.py`. Pending authority returns HTTP 503 with `recovery_pending`. Unavailable integrity authorities do not certify a new durable event. |
+| Receipt capacity and request identity | `tests/test_archive.py` and `tests/test_archive_worker.py` cover bounded archive capacity and idempotency. The security matrix checks that a reused organizer request ID cannot replace the first audit decision. |
+| Held-out detection | `tests/fixtures/detector-heldout.json` and `scripts/evaluate_detector.py --baseline 4f75ed2`. Contested IDs cannot supply causal evidence. Archived replay remains experimental. |
+
+The organizer repository URL is
+[github.com/KillerMeritus/devforge-key-identity-guard](https://github.com/KillerMeritus/devforge-key-identity-guard).
+The owner controls repository visibility and the final public video.

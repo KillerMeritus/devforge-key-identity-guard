@@ -12,6 +12,13 @@ ROLE_TARGETS = {
     "operator": {"catalog", "identity"},
 }
 SERVICE_EDGES = {"service-reader": {("reports", "catalog")}}
+RULE_DETAILS = {
+    "unexpected_role_change": (1, "policy_violation", "Successful grant lacked a matching active approval."),
+    "access_outside_approval": (1, "policy_violation", "Allowed access exceeded the approval scope or validity."),
+    "review_after_role_change": (1, "investigate", "Allowed access followed an unexpected role change in this session."),
+    "lateral_movement_candidate": (1, "investigate", "Related observations crossed distinct unexpected service edges."),
+    "unexpected_allowed_access": (1, "investigate", "The role accessed a service outside its expected service set."),
+}
 
 
 def timestamp(value):
@@ -55,8 +62,12 @@ class Detector:
         if key in self.emitted:
             return None
         self.emitted.add(key)
+        version, classification, explanation = RULE_DETAILS[rule]
         return {
             "anchor_event_id": anchor, "rule": rule, "actor": event["actor"],
+            "rule_version": version, "classification": classification, "explanation": explanation,
+            "service_edges": sorted({(item["source_service"], item["target_service"]) for item in evidence}),
+            "uncertainty_ms": round(UNCERTAINTY_SECONDS * 1000),
             "services": sorted({item[field] for item in evidence
                                 for field in ("source_service", "target_service")}),
             "evidence_event_ids": [item["event_id"] for item in evidence],
@@ -157,8 +168,19 @@ class Detector:
 
 def analyze(events, approvals):
     detector = Detector(approvals)
-    alerts, notes = [], []
+    # Freeze a finite replay's source identities before emitting causal evidence.
+    # A contested ID cannot vouch for either of its payloads.
+    unique, contested = {}, set()
     for event in events:
+        event_id = event["event_id"]
+        if event_id in unique and event != unique[event_id]:
+            contested.add(event_id)
+        unique.setdefault(event_id, event)
+    alerts = []
+    notes = [{"event": event_id, "reason": "conflicting_event_identity"} for event_id in sorted(contested)]
+    for event_id, event in unique.items():
+        if event_id in contested:
+            continue
         new_alerts, new_notes = detector.ingest(event)
         alerts.extend(new_alerts)
         notes.extend(new_notes)

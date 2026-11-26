@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import time
@@ -141,6 +142,7 @@ class Guard:
                 self.checkpoint("prepared")
 
         with self.transaction() as db:
+            self.audit(db)
             identity = self.identity(db, token)
             actor, role, revoked = identity or (None, None, False)
             result = {"allowed": False, "reason": "invalid_device"}
@@ -151,7 +153,10 @@ class Guard:
                                     approval, public_key, challenge, prepared)
             result["request_id"] = secrets.token_hex(16)
             sequence, tag = self.record(db, dict(node=node, actor=actor, role=role, action=action,
-                                 target=target, timestamp=time.time(), allowed=result["allowed"],
+                                 target=self.audit_target(db, action, target),
+                                 credential_ref=self.audit_target(db, "credential", self.digest(token))
+                                 if identity else None,
+                                 timestamp=time.time(), allowed=result["allowed"],
                                  decision="allow" if result["allowed"] else "deny",
                                  reason=result["reason"], request_id=result["request_id"],
                                  version=result.get("version", version)))
@@ -172,8 +177,17 @@ class Guard:
         return db.execute("SELECT actor,role,revoked FROM devices WHERE token=?",
                           (self.digest(token),)).fetchone()
 
+    def audit_target(self, db, action, target):
+        """Record configured asset IDs and opaque references to other request input."""
+        if action == "message":
+            return None
+        if action in {"read", "rotate", "verify_backup"} and re.fullmatch(r"[A-Za-z0-9_.:@-]{1,128}", target):
+            if db.execute("SELECT 1 FROM files WHERE id=?", (target,)).fetchone():
+                return target
+        return "ref:" + hmac.digest(self.audit_key, b"audit-target-v1\0" + target.encode(), "sha256").hex()
+
     def record(self, db, event):
-        event = json.dumps(event, sort_keys=True, separators=(",", ":"))
+        event = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
         head = db.execute("SELECT seq,tag,proof FROM audit_head WHERE singleton=1").fetchone()
         index, previous = 0, ""
         if head:
@@ -213,7 +227,8 @@ class Guard:
                 except (InvalidTag, ValueError):
                     pass
             self.record(db, dict(node=node, actor="local-operator", action="verify_backup",
-                                 target=file, version=version, timestamp=time.time(), allowed=valid,
+                                 target=self.audit_target(db, "verify_backup", file), version=version,
+                                 timestamp=time.time(), allowed=valid,
                                  reason="verified_backup" if valid else "rejected_backup"))
         return valid
 
@@ -238,8 +253,10 @@ class Guard:
                                (actor, target)).fetchone()
             if not grant:
                 return decision("missing_grant")
-            encrypted, current = db.execute("SELECT body,version FROM files WHERE id=?",
-                                            (target,)).fetchone()
+            asset = db.execute("SELECT body,version FROM files WHERE id=?", (target,)).fetchone()
+            if asset is None:
+                raise ValueError("authorization references a missing file")
+            encrypted, current = asset
             if type(version) is not int or version != current:
                 return decision("wrong_version")
             body = self.decrypt(target, current, encrypted)
