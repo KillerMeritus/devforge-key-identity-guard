@@ -51,3 +51,30 @@ the revocation but lost a later unauthorized rotation attempt. The
 fixture expected HTTP 503 in all four cases. The current-state restore
 checks passed inside the same run. Archived historical retrieval is a
 separate pending assertion to add once investigator access exists.
+
+## Isolated archive increment
+
+| Command from the repository root | Observed result |
+|---|---|
+| `python -m unittest discover -s tests -p test_archive.py -v` | 8 passed. Covers canonical bytes and rejecting extra fields, scoped/expired/revoked credentials, exclusive provisioning, pinned identity, chain corruption and missing state, duplicate and conflicting retries, terminal state binding, bounded capacity, a real process kill, and two real writer races. |
+| `python -m unittest discover -s tests -v` | 22 passed and 1 skipped. The skipped archive-enabled rollback fixture remains a release blocker for the archive. The 14 existing baseline tests passed, including both process-kill scenarios. |
+| `python <toolkit>/validate.py --entry track4_service.py` | Toolkit `8901dfb` reported 22 PASS lines and “Local scenario passed.” |
+| Local Playwright/Chromium smoke harness | Both baseline console scenarios passed. Pre-commit recovered v1, post-commit recovered v2, and evidence remained inspectable. |
+
+The archive module uses an explicitly provisioned local SQLite store and
+independent receipt/grant keys. It authenticates a predecessor-linked
+history, binds terminal receipts to their pending intent and expected
+pre-state, and returns retained canonical bytes to an independently scoped
+investigator. Its append API reserves capacity for a terminal receipt.
+Investigator grants in this increment are provisioned fixtures, including
+expired and revoked states.
+
+There are no worker, adapter, CLI, or dashboard changes. A trusted
+test producer supplies the outcome binding. The archive alone cannot attest
+what a working SQLite transaction committed. Worker-side queries of actual
+persisted rows, cross-store coordination and recovery, live investigator grant
+administration, and producer-specific event projections remain pending.
+The authenticated head detects missing records if the newer head survives.
+Restoring the entire archive and its head to a consistent older copy remains
+outside the isolated guarantee. A pending operation stays pending after a
+process kill. It is never automatically aborted because a marker is absent.
