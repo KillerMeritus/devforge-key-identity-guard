@@ -7,7 +7,7 @@ from pathlib import Path
 import statistics
 import time
 
-from kig_core.detector import analyze, timestamp
+from kig_core.detector import Detector, analyze, timestamp
 
 
 def synthetic(repetitions=12):
@@ -63,7 +63,8 @@ def benchmark(*, real_time=False):
     # Compress fixture receipt intervals for a quick, repeatable local replay.
     scale = 1 if real_time else 0.01
     for events, approvals, expected in synthetic():
-        receipts = {}
+        detector = Detector(approvals)
+        alerts = []
         first = timestamp(events[0]["received_time_utc"])
         start = time.perf_counter()
         for event in events:
@@ -71,9 +72,9 @@ def benchmark(*, real_time=False):
             remaining = deadline - time.perf_counter()
             if remaining > 0:
                 time.sleep(remaining)
-            receipts[event["event_id"]] = time.perf_counter()
-        alerts, _ = analyze(events, approvals)
-        emitted = time.perf_counter()
+            emitted, _ = detector.ingest(event, received_at=time.perf_counter())
+            alerts.extend(emitted)
+        alerts.extend(detector.finish())
         detected = {(alert["anchor_event_id"], alert["rule"]) for alert in alerts}
         matched = detected & expected
         tp += len(matched)
@@ -86,8 +87,7 @@ def benchmark(*, real_time=False):
         for alert in alerts:
             if (alert["anchor_event_id"], alert["rule"]) in matched:
                 rule_counts[alert["rule"]] = rule_counts.get(alert["rule"], 0) + 1
-                latest = max(receipts[event_id] for event_id in alert["evidence_event_ids"])
-                latencies.append((emitted - latest) * 1000)
+                latencies.append(alert["latency_ms"])
 
     latencies.sort()
     return dict(events=total, positives=tp + fn, true_positives=tp, false_positives=fp,
@@ -96,7 +96,7 @@ def benchmark(*, real_time=False):
                 false_alerts_per_1000_benign=1000 * benign_alerts / benign, matched_by_rule=rule_counts,
                 latency_samples=len(latencies), median_ms=statistics.median(latencies) if latencies else None,
                 p95_ms=latencies[(95 * len(latencies) - 1) // 100] if latencies else None,
-                receipt_time_scale=scale, latency_scope="local receipt replay, emit at episode end")
+                receipt_time_scale=scale, latency_scope="local receipt-to-alert evaluation; no external transport")
 
 
 if __name__ == "__main__":

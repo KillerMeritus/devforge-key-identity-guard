@@ -65,14 +65,20 @@ processes use ephemeral ports to avoid collisions across fresh runs.
   implement whole-store restore or replace live keys.
 - The audit chain with authenticated head detects edits or tail deletion
   when the head survives. A full snapshot rollback can restore both.
-- The detector evaluates finite batches. It corrects the configured
-  offsets, handles out-of-order input within the five-second timing bound,
-  and treats corrected timestamps within 250 ms as potentially ambiguous.
-  The mixed synthetic replay scores event ID and rule pairs, and measures
-  from receipt of the last required evidence event to episode-end emission.
-  Default replay compresses receipt intervals. Use
-  `python detection_cli.py --real-time` to preserve them and include the
-  batch delay in latency. Neither mode includes production log ingestion.
+- The detector evaluates one event at a time within a finite replay. It
+  emits confirmed approval and correlation findings once their evidence
+  arrives. A generic access-review fallback waits for replay closure so
+  a delayed role-change event can provide a more specific explanation.
+  Each corrected timestamp has a ±125 ms uncertainty range. When ranges overlap,
+  the detector records uncertainty and avoids claiming the change
+  preceded the read. Events outside the five-second timestamp-to-receipt tolerance
+  cannot supply path or causal evidence.
+- The mixed replay scores event ID and rule pairs. Latency starts at
+  receipt of the last required evidence item and ends at local detector
+  emission. Use `python detection_cli.py --real-time` to preserve fixture
+  receipt intervals. The benchmark covers four measured rules, excludes
+  the close-of-input fallback, and does not include a live collector,
+  external delivery, or production-scale state retention.
 - ML-KEM protects the organizer interoperability exchange. File data in
   the demo is encrypted at rest. Messaging is deliberately unsupported and
   an authenticated request to `POST /message` produces an audited 501.
