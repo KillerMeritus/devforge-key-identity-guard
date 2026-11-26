@@ -56,7 +56,7 @@ class ArchiveTest(unittest.TestCase):
                             expires_ms=self.deadline, revoked=False)
         self.projection = {"schema": 1, "entities": [
             {"kind": "approval", "id": "approval-1", "version": 1, "digest": "b" * 64},
-            {"kind": "asset", "id": "brief", "version": 1, "digest": "a" * 64},
+            {"kind": "asset", "id": "brief", "version": 2, "digest": "a" * 64},
         ]}
         self.archive.provision({
             self.producer: {**investigator, "principal": "worker-A", "role": "producer",
@@ -237,7 +237,7 @@ class ArchiveTest(unittest.TestCase):
 
     def changed_projection(self):
         return {"schema": 1, "entities": [
-            {**entity, "version": 2, "digest": "c" * 64}
+            {**entity, "version": entity["version"] + 1, "digest": "c" * 64}
             for entity in self.projection["entities"]
         ]}
 
@@ -252,7 +252,7 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(record["event"]["actor"], "fixture-user")
 
     def test_rotation_intent_and_abort_do_not_claim_completed_mutation(self):
-        pending = self.intent({**self.event, "authorization": "allow", "reason": "approved"})
+        pending = self.intent({**self.event, "authorization": "allow", "reason": "approved", "approval_id": "approval-1"})
         retained = self.archive.retrieve(self.investigator, "worker-A", "event-1")
         self.assertEqual(retained["lifecycle"], "PENDING")
         self.assertFalse(retained["mutation_committed"])
@@ -264,13 +264,17 @@ class ArchiveTest(unittest.TestCase):
         self.assertFalse(retained["mutation_committed"])
 
     def test_rotation_requires_complete_composite_projection(self):
-        event = {**self.event, "authorization": "allow", "reason": "approved"}
+        event = {**self.event, "authorization": "allow", "reason": "approved", "approval_id": "approval-1"}
         partial = {"schema": 1, "entities": self.projection["entities"][1:]}
         with self.assertRaises(ValueError):
             self.archive.append_intent(self.producer, "operation-1", canonical(event),
                                        predecessor=GENESIS, deadline_ms=self.deadline, expected=partial)
+        with self.assertRaises(ValueError):
+            self.intent({**event, "approval_id": "unrelated-approval"})
+        self.assertEqual(self.archive.position(self.producer)["sequence"], 0)
         pending = self.intent(event)
         valid = self.changed_projection()
+        valid["entities"][0].update(version=0, digest=GENESIS)
         for projection in (
             partial,
             {"schema": 1, "entities": [self.projection["entities"][0], valid["entities"][1]]},
@@ -291,3 +295,130 @@ class ArchiveTest(unittest.TestCase):
             db.execute("UPDATE initial SET body=?", (canonical(self.changed_projection()),))
         with self.assertRaises(ArchiveUnavailable):
             self.archive.position(self.producer)
+
+    def test_reviewer_backward_rotation_is_rejected(self):
+        event = {**self.event, "authorization": "allow", "reason": "approved",
+                 "approval_id": "approval-1"}
+        pending = self.intent(event)
+        after = self.changed_projection()
+        after["entities"][0].update(version=0, digest=GENESIS)
+        for invalid_version in (1, 4):
+            after["entities"][1]["version"] = invalid_version
+            with self.subTest(version=invalid_version), self.assertRaises(ValueError):
+                self.archive.finalize(self.producer, pending["tag"], {**self.outcome, "after": after})
+        self.assertTrue(self.archive.position(self.producer)["has_pending"])
+
+    def test_reviewer_unanchored_access_does_not_set_initial_state(self):
+        raw = canonical({**self.event, "entity_id": "unanchored"})
+        unknown = {"schema": 1, "entities": [
+            {"kind": "asset", "id": "unanchored", "version": 1, "digest": "a" * 64},
+        ]}
+        with self.assertRaises(ArchiveConflict):
+            self.archive.append_intent(self.producer, "other", raw, predecessor=GENESIS,
+                                       deadline_ms=self.deadline, expected=unknown)
+        self.assertEqual(self.archive.position(self.producer)["sequence"], 0)
+
+
+    def test_producer_principal_cannot_be_shared_across_nodes(self):
+        expiry = self.deadline
+        grant = dict(principal="worker-A", role="producer", scopes=["rotation"],
+                     expires_ms=expiry, revoked=False, node="A", subsystem="worker")
+        other = Archive(self.directory / "other.sqlite", "other", **self.keys)
+        with self.assertRaisesRegex(ValueError, "inconsistent bindings"):
+            other.provision({self.producer: grant, self.investigator: {**grant, "node": "B"}},
+                            initial=self.projection)
+        self.assertFalse(other.path.exists())
+        other.provision({self.producer: grant, self.investigator: {**grant, "principal": "worker-B", "node": "B"}},
+                        initial=self.projection)
+        pending = other.append_intent(self.producer, "op", canonical(self.event),
+                                      predecessor=GENESIS, deadline_ms=expiry, expected=self.projection)
+        state = other.position(self.investigator)
+        self.assertTrue(state["has_pending"])
+        self.assertIsNone(state["pending"])
+        with self.assertRaises(ArchiveDenied):
+            other.finalize(self.investigator, pending["tag"], self.outcome)
+
+    def test_alert_requires_confirmed_producer_qualified_source(self):
+        kinds = ["detector_source", "detector_alert"]
+        grant = dict(principal="detector-A", role="producer", scopes=kinds,
+                     expires_ms=self.deadline, revoked=False, node="A", subsystem="detector")
+        detector = Archive(self.directory / "detector.sqlite", "detector", **self.keys)
+        detector.provision({
+            self.producer: grant,
+            self.investigator: {k: v for k, v in {**grant, "role": "investigator"}.items()
+                                if k not in {"node", "subsystem"}},
+        }, initial=self.projection)
+        empty = {"schema": 1, "entities": []}
+        observed = {**self.event, "subsystem": "detector", "kind": "detector_source",
+                    "authorization": "observed", "reason": "source_received",
+                    "timing": {"corrected_ms": 1200, "uncertainty_ms": 125}}
+        sources = [{"producer": "detector-A", "event_id": observed["event_id"]}]
+        alert = {**observed, "kind": "detector_alert", "event_id": "alert-1",
+                 "rule_id": "unusual_access", "rule_version": 1, "approval_ref": None,
+                 "source_ids": sources}
+
+        def append(op, event, previous):
+            return detector.append_intent(self.producer, op, canonical(event), predecessor=previous,
+                                          deadline_ms=self.deadline, expected=empty)
+
+        with self.assertRaises(ArchiveConflict):
+            append("alert", alert, GENESIS)
+        source = append("source", observed, GENESIS)
+        with self.assertRaises(ArchiveConflict):
+            append("alert", alert, source["tag"])
+        confirmed = detector.finalize(self.producer, source["tag"],
+                                      {**self.outcome, "before": empty, "after": empty})
+        for ids in ([{"producer": "other", "event_id": observed["event_id"]}], sources * 2):
+            with self.assertRaises(ValueError):
+                append("alert", {**alert, "source_ids": ids}, confirmed["tag"])
+        append("alert", alert, confirmed["tag"])
+        retained = detector.retrieve(self.investigator, "detector-A", observed["event_id"])
+        self.assertEqual(retained["event_bytes"], canonical(observed))
+        self.assertEqual(retained["lifecycle"], "CONFIRMED")
+
+    def test_expired_producer_cannot_finalize_pending(self):
+        pending = self.intent()
+        with patch.object(Archive, "now", return_value=self.deadline):
+            with self.assertRaises(ArchiveDenied):
+                self.archive.finalize(self.producer, pending["tag"], self.outcome)
+        self.assertEqual(self.archive.position(self.producer)["pending"], pending)
+
+    def test_explicit_creation_unknown_denial_and_revocation_noop(self):
+        archive = Archive(self.directory / "transitions.sqlite", "transitions", **self.keys)
+        archive.provision({self.producer: dict(
+            principal="worker-A", role="producer", node="A", subsystem="worker",
+            scopes=["enrolment", "resource_create", "access_decision", "revocation"],
+            expires_ms=self.deadline, revoked=False,
+        )}, initial=self.projection)
+        head = GENESIS
+
+        def operation(name, kind, entity_id, authorization, reason, before, after):
+            nonlocal head
+            event = {**self.event, "event_id": name, "kind": kind, "entity_id": entity_id,
+                     "authorization": authorization, "reason": reason}
+            pending = archive.append_intent(self.producer, name, canonical(event), predecessor=head,
+                                            deadline_ms=self.deadline, expected=before)
+            final = archive.finalize(self.producer, pending["tag"], {
+                **self.outcome, "before": before, "after": after,
+            })
+            head = final["tag"]
+            return final
+
+        empty = {"schema": 1, "entities": []}
+        operation("denial", "access_decision", "absent", "deny", "unknown_resource", empty, empty)
+
+        def projection(kind, entity_id, version, **metadata):
+            return {"schema": 1, "entities": [
+                {"kind": kind, "id": entity_id, "version": version,
+                 "digest": str(version) * 64, **metadata},
+            ]}
+
+        operation("create", "resource_create", "new", "allow", "authorized",
+                  projection("asset", "new", 0), projection("asset", "new", 1))
+        absent = projection("credential", "device", 0, status="absent")
+        active = projection("credential", "device", 1, status="active")
+        revoked = projection("credential", "device", 2, status="revoked")
+        operation("enrol", "enrolment", "device", "allow", "authorized", absent, active)
+        operation("revoke", "revocation", "device", "allow", "revoked", active, revoked)
+        final = operation("noop", "revocation", "device", "allow", "already_revoked", revoked, revoked)
+        self.assertEqual(final["outcome"]["before"], final["outcome"]["after"])

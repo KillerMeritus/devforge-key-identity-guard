@@ -123,3 +123,37 @@ source provenance, cross-process worker enforcement and row verification,
 historical access during quarantine, and live investigator grant lifecycle.
 The isolated schema change applies to freshly provisioned fixtures. There
 is no archive migration or full-archive rollback guarantee in this revision.
+
+## Independent review regressions
+
+The unanchored-entity test reproduced the baseline failure on `ea882a4`
+before the fix. The current tests reject backward and skipped rotations,
+mismatched approval IDs, unconsumed approvals, unanchored existing entities,
+inconsistent producer bindings, and missing or duplicate detector references.
+An approved v2-to-v3 rotation consumes its bound approval. Explicit creation
+starts from an absent projection. An already-revoked credential can produce
+a confirmed no-op, rather than a new state transition.
+
+| Command | Observed result |
+|---|---|
+| `python -m unittest discover -s tests -p test_archive.py -v` | 18 isolated cases covered by the full run. |
+| `python -m unittest discover -s tests -v` | 32 passed, one archive-enabled rollback test skipped. |
+| `python <toolkit>/validate.py --entry track4_service.py` | 22 public PASS lines. |
+| Local Playwright/Chromium smoke harness | Both baseline crash scenarios passed. |
+
+Archive provisioning accepts a bounded initial manifest of up to 1,024
+entries and rejects invalid input. A worker still must enumerate and verify
+the full relevant initial state. Detector provenance is tested at the
+isolated archive boundary. The worker producer, full kind-specific allowlists,
+and end-to-end retained source collection are pending.
+
+For R-05, the worker recovery design requires a distinct, manually authorized
+recovery credential scoped to one pending receipt and a verified outcome.
+Record the recovery actor separately from the original producer. Keep the
+operation unresolved if the required evidence is absent. The archive test
+confirms expiration alone cannot finalize or abort. Recovery authorization
+is a worker-integration gate, with no automatic fallback to expired grants.
+
+The baseline workers still run without archive integration. The prior
+capacity benchmark describes its measured revision. No new capacity
+performance claim is made here.

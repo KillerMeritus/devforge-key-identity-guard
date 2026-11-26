@@ -32,6 +32,7 @@ KINDS = frozenset({
     "access_decision", "evidence_access", "enrolment", "revocation", "role_change",
     "grant_change", "approval_issue", "approval_consume", "rotation", "backup_verify",
     "restore", "trust_change", "archive_control", "detector_source", "detector_alert",
+    "resource_create",
 })
 
 
@@ -62,43 +63,79 @@ def integer(value):
 
 STATE_MUTATIONS = frozenset({
     "enrolment", "revocation", "role_change", "grant_change", "approval_issue",
-    "approval_consume", "rotation", "restore", "trust_change",
+    "approval_consume", "rotation", "restore", "trust_change", "resource_create",
 })
-KINDS_WITH_EVIDENCE = {"detector_alert"}
+CREATION_KINDS = {"enrolment": "credential", "resource_create": "asset", "approval_issue": "approval"}
+TELEMETRY_KINDS = {"detector_source", "detector_alert"}
+MAX_INITIAL_PROJECTIONS = 1024
 
 
 def event_schema(value):
-    fields(value, "version event_id request_id actor node subsystem kind entity_id authorization reason received_ms source_ids")
-    if type(value["version"]) is not int or value["version"] != 2 or value["kind"] not in KINDS:
+    if type(value) is not dict or not isinstance(value.get("kind"), str):
+        raise ValueError("invalid event")
+    kind = value["kind"]
+    names = "version event_id request_id actor node subsystem kind entity_id authorization reason received_ms source_ids"
+    rotation = kind == "rotation" and value.get("authorization") == "allow"
+    fields(value, names + (" approval_id" if rotation else "") + (" timing" if kind in TELEMETRY_KINDS else "")
+           + (" rule_id rule_version approval_ref" if kind == "detector_alert" else ""))
+    if type(value["version"]) is not int or value["version"] != 2 or kind not in KINDS:
         raise ValueError("unsupported event schema or kind")
     for name in ("event_id", "request_id", "actor", "node", "subsystem", "entity_id", "reason"):
         identifier(value[name])
     if value["authorization"] not in ("allow", "deny", "observed", "unavailable"):
         raise ValueError("invalid event result")
+    if rotation:
+        identifier(value["approval_id"])
+        if value["reason"] != "approved":
+            raise ValueError("authorized rotation requires a valid approval decision")
+    if kind in CREATION_KINDS and value["authorization"] == "allow" and value["reason"] != "authorized":
+        raise ValueError("creation requires an authorized decision")
     integer(value["received_ms"])
     sources = value["source_ids"]
-    if not isinstance(sources, list) or len(sources) > 32:
+    if type(sources) is not list or len(sources) > 32 or bool(sources) != (kind == "detector_alert"):
         raise ValueError("invalid evidence references")
+    refs = []
     for source in sources:
-        identifier(source)
-    if len(set(sources)) != len(sources) or (value["kind"] in KINDS_WITH_EVIDENCE and not sources):
-        raise ValueError("missing or duplicate evidence references")
+        fields(source, "producer event_id")
+        identifier(source["producer"])
+        identifier(source["event_id"])
+        refs.append((source["producer"], source["event_id"]))
+    if len(set(refs)) != len(refs):
+        raise ValueError("duplicate evidence reference")
+    if kind in TELEMETRY_KINDS:
+        timing = value["timing"]
+        fields(timing, "corrected_ms uncertainty_ms")
+        integer(timing["corrected_ms"])
+        integer(timing["uncertainty_ms"])
+    if kind == "detector_alert":
+        identifier(value["rule_id"])
+        integer(value["rule_version"])
+        if value["rule_version"] == 0:
+            raise ValueError("invalid rule version")
+        if value["approval_ref"] is not None:
+            identifier(value["approval_ref"])
 
 
-def projection_schema(projection):
+def projection_schema(projection, *, maximum=MAX_PROJECTIONS):
     fields(projection, "schema entities")
     if type(projection["schema"]) is not int or projection["schema"] != 1:
         raise ValueError("invalid projection version")
     entities = projection["entities"]
-    if not isinstance(entities, list) or not 1 <= len(entities) <= MAX_PROJECTIONS:
+    if not isinstance(entities, list) or len(entities) > maximum:
         raise ValueError("invalid projection size")
     keys = []
     for entity in entities:
-        fields(entity, "kind id version digest")
+        credential = type(entity) is dict and entity.get("kind") == "credential"
+        fields(entity, "kind id version digest" + (" status" if credential else ""))
         identifier(entity["kind"])
         identifier(entity["id"])
         integer(entity["version"])
         digest(entity["digest"])
+        if (entity["version"] == 0) != (entity["digest"] == GENESIS):
+            raise ValueError("absent state must use version zero and the zero digest")
+        if credential and (entity["status"] not in ("absent", "active", "revoked")
+                           or (entity["status"] == "absent") != (entity["version"] == 0)):
+            raise ValueError("invalid credential status")
         keys.append((entity["kind"], entity["id"]))
     if keys != sorted(set(keys)):
         raise ValueError("projections must be uniquely identified and ordered")
@@ -119,15 +156,40 @@ def outcome_schema(outcome, pending):
     if outcome["basis"] == "verified_noncommit":
         if before != after or outcome["delivery"] != "withheld":
             raise ValueError("abort must leave state unchanged and withhold response data")
-    elif event["kind"] in STATE_MUTATIONS and event["authorization"] == "allow":
-        if before == after:
+    elif event["authorization"] == "allow" and event["kind"] in STATE_MUTATIONS:
+        kind = event["kind"]
+        changes = list(zip(before["entities"], after["entities"]))
+        if kind == "revocation":
+            old, new = changes[0]
+            if event["reason"] == "already_revoked":
+                if old["status"] != "revoked" or before != after:
+                    raise ValueError("idempotent revocation requires unchanged revoked state")
+            elif (old["status"] != "active" or new["status"] != "revoked"
+                  or new["version"] != old["version"] + 1 or old["digest"] == new["digest"]):
+                raise ValueError("revocation must transition active state to revoked")
+        elif kind in CREATION_KINDS:
+            if any(old["version"] != 0 or new["version"] != 1 for old, new in changes):
+                raise ValueError("creation must transition from absent to version one")
+            if kind == "enrolment" and after["entities"][0]["status"] != "active":
+                raise ValueError("enrolment must establish an active credential")
+        elif kind == "rotation":
+            for old, new in changes:
+                if old["version"] == 0 or old["digest"] == new["digest"]:
+                    raise ValueError("rotation requires existing state and new content")
+                if old["kind"] == "asset" and new["version"] != old["version"] + 1:
+                    raise ValueError("rotation must advance the asset by one version")
+                if old["kind"] == "approval" and new["version"] != 0:
+                    raise ValueError("rotation must consume its bound approval")
+        elif before == after:
             raise ValueError("successful mutation must bind a state change")
-        if event["kind"] == "rotation" and any(
-            old == new for old, new in zip(before["entities"], after["entities"])
-        ):
-            raise ValueError("authorized rotation must change every covered entity")
     elif before != after:
         raise ValueError("non-mutation or denied intent cannot change projected state")
+
+
+def producer_allows(grant, record):
+    return (record["producer"] == grant["principal"] and record["node"] == grant["node"]
+            and record["subsystem"] == grant["subsystem"] and record["event"]["kind"] in grant["scopes"])
+
 
 
 def decode_event(raw):
@@ -161,14 +223,20 @@ class Archive:
 
     def provision(self, grants, *, initial):
         """Create a new archive exclusively. Never run from a request path."""
-        projection_schema(initial)
+        projection_schema(initial, maximum=MAX_INITIAL_PROJECTIONS)
+        if not initial["entities"] or any(entity["version"] == 0 for entity in initial["entities"]):
+            raise ValueError("initial projection requires the existing entities")
         prepared = []
+        bindings = {}
         for token, grant in grants.items():
             token_digest = self.token_digest(token)
             if grant.get("role") == "producer":
                 fields(grant, "principal role scopes expires_ms revoked node subsystem")
                 identifier(grant["node"])
                 identifier(grant["subsystem"])
+                binding = grant["node"], grant["subsystem"]
+                if bindings.setdefault(grant["principal"], binding) != binding:
+                    raise ValueError("producer identity has inconsistent bindings")
             else:
                 fields(grant, "principal role scopes expires_ms revoked")
             identifier(grant["principal"])
@@ -239,6 +307,7 @@ class Archive:
                 if row is None:
                     raise ArchiveUnavailable("missing initial projection")
                 initial = json.loads(row[0])
+                projection_schema(initial, maximum=MAX_INITIAL_PROJECTIONS)
                 if row[0] != canonical(initial) or not hmac.compare_digest(
                     row[1], self.mac(self.receipt_key, b"archive-initial-v1", initial)
                 ):
@@ -283,8 +352,7 @@ class Archive:
                                  "can_accept_intent": outstanding is None and len(records) + 2 <= MAX_RECORDS},
                     "has_pending": outstanding is not None,
                     "pending": (outstanding if outstanding and
-                                outstanding["producer"] == grant["principal"] and
-                                outstanding["event"]["kind"] in grant["scopes"] else None)}
+                                producer_allows(grant, outstanding) else None)}
 
     def append_intent(self, token, operation_id, raw_event, *, predecessor, deadline_ms, expected):
         identifier(operation_id)
@@ -292,12 +360,29 @@ class Archive:
         integer(deadline_ms)
         event = decode_event(raw_event)
         keys = projection_schema(expected)
-        if event["entity_id"] not in {entity_id for _, entity_id in keys}:
+        kind = event["kind"]
+        creating = event["authorization"] == "allow" and kind in CREATION_KINDS
+        no_projection = kind in TELEMETRY_KINDS or (
+            kind == "access_decision" and event["authorization"] == "deny"
+            and event["reason"] == "unknown_resource")
+        if no_projection:
+            if keys:
+                raise ValueError("this event must not assert entity state")
+        elif event["entity_id"] not in {entity_id for _, entity_id in keys}:
             raise ValueError("intent must cover the event entity")
-        if event["kind"] == "rotation" and event["authorization"] == "allow":
-            if (len(keys) != 2 or ("asset", event["entity_id"]) not in keys
-                    or {kind for kind, _ in keys} != {"asset", "approval"}):
-                raise ValueError("rotation must cover the asset and approval")
+        if creating and (keys != [(CREATION_KINDS[kind], event["entity_id"])]
+                         or expected["entities"][0]["version"] != 0):
+            raise ValueError("creation must bind one absent entity")
+        if kind == "revocation" and event["authorization"] == "allow" and (
+            keys != [("credential", event["entity_id"])]
+            or event["reason"] not in ("revoked", "already_revoked")
+        ):
+            raise ValueError("revocation must bind a credential and a supported decision")
+        if kind == "rotation" and event["authorization"] == "allow":
+            if keys != [("approval", event["approval_id"]), ("asset", event["entity_id"])] or any(
+                item["version"] == 0 for item in expected["entities"]
+            ):
+                raise ValueError("rotation must cover the asset and its live approval")
         with self.verified(write=True) as (db, records, head, initial):
             grant = self.authorize(db, token, "producer")
             producer = grant["principal"]
@@ -323,10 +408,23 @@ class Archive:
                 if record["state"] == "CONFIRMED":
                     for entry in record["outcome"]["after"]["entities"]:
                         latest[entry["kind"], entry["id"]] = entry
+            if kind == "access_decision" and no_projection:
+                asset = latest.get(("asset", event["entity_id"]))
+                if asset is not None and asset["version"] != 0:
+                    raise ArchiveConflict("known asset cannot be recorded as unknown")
             for entry in expected["entities"]:
                 known = latest.get((entry["kind"], entry["id"]))
-                if known is not None and known != entry:
+                if known is None and not creating:
+                    raise ArchiveConflict("intent references unanchored state")
+                if known is not None and (known != entry or creating):
                     raise ArchiveConflict("intent disagrees with latest retained projection")
+            if kind == "detector_alert":
+                confirmed = {record["pending_tag"] for record in records if record["state"] == "CONFIRMED"}
+                retained = {(record["producer"], record["event"]["event_id"]) for record in records
+                            if record["tag"] in confirmed and record["event"]["kind"] == "detector_source"}
+                if any((source["producer"], source["event_id"]) not in retained
+                       for source in event["source_ids"]):
+                    raise ArchiveConflict("alert references unavailable retained source evidence")
             if len(records) + 2 > MAX_RECORDS:
                 raise ArchiveUnavailable("archive capacity exhausted")
             return self._append(db, records, head, producer=producer, operation_id=operation_id,
@@ -340,8 +438,7 @@ class Archive:
             pending = next((r for r in records if r["tag"] == pending_tag and r["state"] == "PENDING"), None)
             if pending is None:
                 raise ArchiveConflict("unknown pending receipt")
-            if (pending["producer"] != grant["principal"] or pending["event"]["kind"] not in grant["scopes"]
-                    or pending["node"] != grant["node"] or pending["subsystem"] != grant["subsystem"]):
+            if not producer_allows(grant, pending):
                 raise ArchiveDenied("pending receipt outside producer scope")
             outcome_schema(outcome, pending)
             state = "CONFIRMED" if outcome["basis"] == "verified_commit" else "ABORTED"
@@ -373,5 +470,6 @@ class Archive:
                             "terminal_receipt": terminal, "lifecycle": lifecycle,
                             "mutation_committed": (lifecycle == "CONFIRMED"
                                                    and event["kind"] in STATE_MUTATIONS
-                                                   and event["authorization"] == "allow")}
+                                                   and event["authorization"] == "allow"
+                                                   and terminal["outcome"]["before"] != terminal["outcome"]["after"])}
             raise LookupError("unknown retained event")
