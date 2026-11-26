@@ -1,0 +1,4 @@
+pqcrypto==0.4.0
+cryptography==50.0.0
+fastapi==0.141.1
+uvicorn==0.52.1
