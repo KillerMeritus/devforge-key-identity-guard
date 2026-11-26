@@ -56,8 +56,14 @@ def evaluate(module, fixture):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline")
+    parser.add_argument("--expanded", action="store_true", help="evaluate the separate expanded cohort")
     args = parser.parse_args()
-    fixture = json.loads((ROOT / "tests/fixtures/detector-heldout.json").read_text())
+    if args.expanded:
+        from scripts.expanded_detector_fixture import generate
+
+        fixture = generate()
+    else:
+        fixture = json.loads((ROOT / "tests/fixtures/detector-heldout.json").read_text())
     result = {"candidate": evaluate(detector, fixture)}
     if args.baseline:
         result["baseline"] = evaluate(load_baseline(args.baseline), fixture)

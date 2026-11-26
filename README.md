@@ -252,10 +252,12 @@ to the path of the pinned toolkit checkout if it is stored elsewhere.
 
 ```sh
 PYTHONPATH=. python tests/reviewer_worker_core.py
+python -m unittest discover -s tests -p test_root_adapter_contract.py -v
 python demo_cli.py --kill-at pre --json
 python demo_cli.py --kill-at post --json
 PYTHONPATH=. python scripts/smoke_archive_ops.py
 PYTHONPATH=. python scripts/evaluate_detector.py --baseline 4f75ed2
+PYTHONPATH=. python scripts/evaluate_detector.py --expanded --baseline 4f75ed2
 PYTHONPATH=. python scripts/measure_rubric.py --practice "$toolkit_dir/practice"
 ```
 
@@ -277,3 +279,5 @@ use temporary state and ephemeral ports.
 - [Measured results](METRICS.md)
 - [Judge demo guide](JUDGE_DEMO_GUIDE.md) and [technical Q&A](JUDGE_QA.md)
 - [Evidence and acceptance](EVIDENCE.md)
+
+See the [black-box adapter coverage](HIDDEN_ASSESSMENT.md) for test functions and observed contract results.

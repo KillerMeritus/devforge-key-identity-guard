@@ -120,3 +120,33 @@ replay, with no live worker ingestion.
 
 A genuinely ambiguous archive crash remains quarantined, so there is no
 recovery-availability sample for that state. Archive results are experimental.
+
+## Expanded deterministic detector evaluation
+
+The 24-input held-out file is unchanged. A separate scenario-authored
+generator uses 12 cohorts with varying identities, service edges and approval
+targets. It labels routine noise, approved access, scoped violations,
+out-of-order pairs, clock overlaps and contested identities independently
+of the detector. The expanded replay includes **1,284 inputs**, **1,176
+labelled benign IDs**, and **12 contested IDs**.
+
+```sh
+PYTHONPATH=. python scripts/evaluate_detector.py --expanded --baseline 4f75ed2
+```
+
+| Revision | TP | FP | FN | F1 | False alerts / 1,000 benign | Matched alert latency median / p95 (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| Detector at 4f75ed2 | 72 | 24 | 0 | 0.857 | 20.41 | 0.0024 / 0.0058 |
+| Reviewed detector at baf8eae and final candidate | 72 | 0 | 0 | 1.000 | 0.00 | 0.0028 / 0.0079 |
+
+Each latency row has 72 matched samples. This is local finite replay and
+excludes networking, archive writes and live collection. These synthetic
+scenarios do not establish production accuracy. The evidence package
+contains the original measurement and a clean-checkout rerun.
+
+Finite replay examines the complete batch before emitting findings, so
+conflicting payloads under one ID are quarantined as evidence in either
+arrival order. Uncontested findings are still evaluated. The experimental
+archive replay rejects a conflicting input before confirmation. Live alert
+reconciliation for conflicts that arrive after an alert has already been
+published remains outside the implemented scope.
