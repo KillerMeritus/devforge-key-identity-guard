@@ -1,54 +1,200 @@
-# Recovery Console · DevForge Track 4
+# Recovery Console | DevForge Track 4
 
-A synthetic secure-file workflow that demonstrates device revocation across
-two local workers and key rotation recovery across a real process kill.
+A local security assurance laboratory for protected files: device revocation,
+atomic key rotation, crash recovery, authenticated audit evidence and security
+monitoring. Two independently running worker processes share one SQLite
+authority on the same host.
 
-## Setup
+**Start here:** the browser demo needs only Python and the pinned dependencies.
+No API keys, cloud account, database server, Node.js, npm, or manual credentials
+are required. All demonstration data and credentials are generated in disposable
+local fixtures.
 
-Use Linux and Python 3.12. This release was verified on x86_64 with Python
-3.12.14. From a clean checkout, create a virtual environment and install the
-pinned dependencies. For offline setup, stage compatible wheels first,
-then use pip with `--no-index --find-links /path/to/wheelhouse`.
+## 1. Install (Linux, Python 3.12)
+
+The release was verified on x86_64 Linux with Python 3.12.14. Use a Linux terminal
+(or Linux inside WSL2 on Windows; native Windows was not verified). Git, Python
+3.12, its venv module and pip must be available. Internet access is needed for
+the initial clone and dependency installation unless the files and wheels have
+already been staged.
+
+Copy these commands into a terminal:
 
 ```sh
-python -m venv .venv
+git clone https://github.com/KillerMeritus/devforge-key-identity-guard.git
+cd devforge-key-identity-guard
+python3.12 --version
+python3.12 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m pip check
-git clone https://github.com/ScalerOpenSourceLabs/Track-4-Toolkit.git ../Track-4-Toolkit
-toolkit_dir="$PWD/../Track-4-Toolkit"
-git -C "$toolkit_dir" checkout --detach 8901dfb
-PYTHONDONTWRITEBYTECODE=1 python "$toolkit_dir/validate.py" --entry ./track4_service.py
-python -m unittest discover -s tests -v
 ```
 
-The toolkit used during development was commit `8901dfb`. Keep it separate
-from the submission. The judge import path uses Python's standard library
-and the organizer's `pqcrypto`. FastAPI, Uvicorn, and cryptography are
-demo dependencies. The judge gets its own writable state directory and
-does not import the HTTP server. The source tree can be read-only after setup.
-Set `TRACK4_STATE_DIR` to an isolated writable directory when invoking the
-adapter directly. When unset, the adapter uses an OS temporary directory.
-Demo and test fixtures independently allocate writable temporary state.
-No manual credentials or configuration files are needed for these commands.
-The organizer audit lookup covers ordinary reads keyed by request ID. A
-conflicting request cannot overwrite the first decision. The demo worker separately records
-protected-read decisions in its authenticated audit chain.
+Expected: Python reports 3.12.x, installation exits successfully, and pip check
+reports no broken requirements. Use the exact versions in
+[requirements.txt](requirements.txt); do not substitute older crypto libraries.
 
-## Stages and human checks
+Already have a checkout? Start in its repository root and skip the clone and cd
+commands. In every new terminal, change to that root and activate the same
+environment with `. .venv/bin/activate`.
 
-| Stage | Command | What to look for |
+## 2. Run the application (recommended for judges)
+
+From the repository root, with the virtual environment activated:
+
+```sh
+python console.py
+```
+
+Expected terminal output: `Recovery Console: http://127.0.0.1:8080`.
+
+Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)** in a modern browser.
+Keep the terminal running. Use this exact address, not localhost, because the
+console enforces its loopback Host and Origin.
+
+No separate worker startup is needed. Selecting a scenario starts the necessary
+local worker processes and creates fresh synthetic state automatically. Stop the
+console with Ctrl+C in the terminal when finished.
+
+### What to demonstrate
+
+| Console section | Action | Expected result |
 |---|---|---|
-| 1. Organizer adapter | `python ../Track-4-Toolkit/validate.py --entry track4_service.py` followed by `python -m unittest discover -s tests -p test_adapter.py -v` | The public checker ends in “Local scenario passed”. The independent client verifies the protected-read proof, and revoked and malformed requests disclose no proof or content. |
-| 2. Two-node identity | `python demo_cli.py --kill-at pre` | Each node reports an explicit revoked-device denial while the teammate's file still verifies. The harness also checks that a regular device cannot revoke or rotate and the owner can use a new credential. |
-| 3. Rotation and recovery | Run `python demo_cli.py --kill-at pre` and `python demo_cli.py --kill-at post` | Pre-commit recovers v1. Post-commit recovers v2 and shows a durable rotation event. Both runs show five successful Node B reads during preparation, reject a damaged key backup, and preserve revocation. Post-commit also shows five v2 reads before the rotation reply. |
-| 4. Audit and detection | `python detection_cli.py --practice ../Track-4-Toolkit/practice` and the full unit suite | The practice log should flag the unexpected role change, its subsequent access, and the report worker's cross-service path. Approved changes and isolated routine denials are quiet. The tests verify exact expiry, uncertainty, audit row edits, and tail deletion with the head intact. |
-| 5. Operator console | `python console.py`, then open `http://127.0.0.1:8080` | Predict v1 for “Before commit” and v2 for “After commit”. Run each choice and open an event. Node outcomes and evidence come from the real harness. Try an incorrect prediction and confirm the UI still shows the observed version. |
-| 6. Release | Repeat from a fresh Git checkout | Save command output, add the final two-page brief and a recorded demo link, then confirm public repository and video access before submission. |
+| Security scenarios | Select Device revocation and run | Both workers explicitly deny the revoked device (403); teammate access succeeds (200). |
+| Security scenarios | Select Expired and consumed approvals, or Competing rotations | Invalid or reused approval denied; only an eligible rotation commits. |
+| Recovery Lab | Select Before commit, predict v1, run | Real process termination and restart; v1 survives, revocation remains effective. |
+| Recovery Lab | Select After commit, predict v2, run | v2 survives, v1 is denied, revocation remains effective. |
+| Security scenarios | Select Damaged backup | Intact key backup accepted, damaged copy rejected. |
+| Security scenarios | Select Evidence Passport verification | Original worker statements authenticate; modified copies are rejected; historical claims are appraised. An optional judge challenge must be exactly 64 lowercase hexadecimal digits. |
+| Operational audit monitor | Run monitored fixtures | Authenticated findings and matching denied-response containment observations stream during controlled runs. |
+| Detection View | Run the synthetic replay | Contextual findings and clock-uncertainty notes with source references. |
+| Security Time Machine / stale-state quarantine | Run the experimental scenario | Stale state returns 503; verified-current restore preserves legitimate access and revocation. |
 
-Use `python demo_cli.py --kill-at post --json` to export redacted evidence.
-The console displays the timeline after the run completes. The service
-processes use ephemeral ports to avoid collisions across fresh runs.
+The baseline Recovery Lab is the recommended competition path. Experimental
+archive features have additional trust and availability constraints described
+below. HTTP 503 is fail-closed unavailability, not an explicit revocation denial.
+
+## 3. Run without a browser
+
+No browser or organizer toolkit is needed for these commands:
+
+```sh
+python demo_cli.py --kill-at pre
+python demo_cli.py --kill-at post
+python detection_cli.py
+```
+
+Expected: the first two commands finish with PASS and recovered v1 and v2,
+respectively. The detector emits a JSON report for synthetic events.
+Use `--json` on either recovery command for machine-readable evidence.
+
+## 4. Organizer automated assessment
+
+The official entry point is [track4_service.py](track4_service.py), in the
+repository root. It accepts one UTF-8 JSON request on stdin and emits one JSON
+response on stdout. It does not require the browser console or HTTP workers.
+
+The adapter uses Python's standard library and `pqcrypto==0.4.0`; the full
+requirements file also installs the dependencies needed for the demonstration.
+The organizer supplies a writable `TRACK4_STATE_DIR` for persistent state across
+invocations. Use an isolated writable directory for manual adapter runs.
+Do not reset it between requests in the same test. The source tree can be
+read-only after setup.
+
+To reproduce the public organizer validator locally, keep the toolkit outside
+this repository:
+
+```sh
+git clone https://github.com/ScalerOpenSourceLabs/Track-4-Toolkit.git ../Track-4-Toolkit
+toolkit_dir="$PWD/../Track-4-Toolkit"
+git -C "$toolkit_dir" checkout --detach 8901dfbdbfe048853e0bfa25b60583d1e6617a63
+PYTHONDONTWRITEBYTECODE=1 python "$toolkit_dir/validate.py" --entry ./track4_service.py
+```
+
+If the toolkit is already cloned, skip its clone command and set
+`toolkit_dir` to its existing absolute path. Expected: 22 passing public
+checks and “Local scenario passed”. This public validator does not establish
+hidden-assessment results.
+
+## 5. Run the release checks
+
+Run from the repository root with the virtual environment active. The toolkit
+is only needed for the public validator and organizer practice fixtures.
+
+```sh
+python -m unittest discover -s tests -v
+PYTHONPATH=. python tests/reviewer_worker_core.py
+PYTHONPATH=. python scripts/smoke_archive_ops.py
+```
+
+The frozen engineering release
+[`27d5a8b4ce45ce5666cd1134a6f12fe4d445e524`](https://github.com/KillerMeritus/devforge-key-identity-guard/commit/27d5a8b4ce45ce5666cd1134a6f12fe4d445e524)
+reported 96 application tests, seven reviewer regressions and 22 organizer
+checks passing in the pinned runtime. This README clarification does not
+change the application code or imply a fresh test run.
+
+For the organizer practice detector replay (after step 4):
+
+```sh
+python detection_cli.py --practice "$toolkit_dir/practice"
+```
+
+For optional automated browser checks, first stop any running console so that
+port 8080 is free. Playwright is not needed for manual browser use.
+
+```sh
+python -m pip install playwright==1.62.0
+python -m playwright install chromium
+python scripts/smoke_console.py
+```
+
+On Linux, Chromium may also require system libraries; follow Playwright's
+dependency-installation guidance for your distribution. If Chromium is
+already installed, use `python scripts/smoke_console.py --chromium /path/to/chromium`.
+
+## 6. Offline installation and troubleshooting
+
+For offline installation, stage compatible wheels on a connected Linux machine
+with the same Python version and architecture before going offline:
+
+```sh
+python -m pip download -r requirements.txt -d /path/to/wheelhouse
+```
+
+On the offline machine, after creating and activating the virtual environment:
+
+```sh
+python -m pip install --no-index --find-links /path/to/wheelhouse -r requirements.txt
+python -m pip check
+```
+
+The checkout and any optional toolkit or browser-test dependencies must also
+be staged separately.
+
+| Problem | Resolution |
+|---|---|
+| python3.12 not found or venv creation fails | Install Python 3.12 and its venv support for your Linux distribution. |
+| ImportError or missing ML-KEM / ML-DSA modules | Activate the project environment and reinstall the pinned requirements. Check `python --version` and `python -m pip check`. |
+| Console cannot bind to port 8080 | Stop the existing console or other process using that port, then restart. |
+| Browser returns 404 or 403 | Open the exact URL http://127.0.0.1:8080 directly; do not use a proxy or alternate hostname. |
+| Scenario reports FAIL or UNAVAILABLE | Inspect the console terminal and displayed evidence; rerun the disposable fixture after resolving the error. Do not treat unavailability as successful authorization. |
+| Toolkit path not found | Use the absolute path to the separately cloned toolkit. |
+| Browser smoke cannot launch Chromium | Install Playwright's Chromium and its system dependencies, or supply an existing Chromium executable. |
+
+## 7. Technical documentation
+
+- [Project overview](PROJECT_OVERVIEW.md)
+- [Official objective coverage](OBJECTIVE_COVERAGE.md)
+- [Measured results](METRICS.md)
+- [Judge demo guide](JUDGE_DEMO_GUIDE.md) and [technical Q&A](JUDGE_QA.md)
+- [Engineering handoff](ENGINEERING_HANDOFF.md)
+- [Evidence and acceptance](EVIDENCE.md)
+- [Black-box adapter coverage](HIDDEN_ASSESSMENT.md)
+- [Threat model metadata](threat-model.json)
+
+The following sections describe the advanced architecture, manual archive
+operation and additional verification commands. They are not required to
+launch the standard demonstration.
 
 ## Design and evidence limits
 
@@ -70,8 +216,9 @@ processes use ephemeral ports to avoid collisions across fresh runs.
   writer during the commit transaction.
 - Key backups are encrypted and verified against the active asset and
   version. The demo uses a generated damaged fixture, because the toolkit
-  checkout has no `practice/bad_backup.bin`. Backup verification does not
-  implement whole-store restore or replace live keys.
+  checkout has no `practice/bad_backup.bin`. Baseline key-backup verification does not
+  restore a whole store or replace live keys. Experimental verified snapshot
+  restoration is described below.
 - The audit chain with authenticated head detects edits or tail deletion
   when the head survives. The external revocation checkpoint covers stale
   file snapshots as described below.
@@ -177,7 +324,12 @@ python archive_ops.py --state "$state" restore "$verified_snapshot"
 ```
 
 The recovery and restore commands verify under the same lock used by the
-workers. A live worker can record `ABORTED` when SQLite rolls back its open
+workers. To export a verified current snapshot, use
+`python archive_ops.py --state "$state" export "$verified_snapshot"` with a new
+private destination. Restore requires the exact retained checkpoint, original
+keys, witness and independent archive. Even a subsequent read can make an
+older snapshot ineligible. Stop both workers before restoring a missing working
+database; ensure no stale SQLite sidecars remain. A live worker can record `ABORTED` when SQLite rolls back its open
 transaction and the preceding application state verifies. If a killed worker
 left a pending receipt without positive evidence of commit or rollback, both
 workers return HTTP 503 for protected operations. Retain the stores for
@@ -198,12 +350,6 @@ PYTHONPATH=. python tests/reviewer_worker_core.py
 PYTHONPATH=. python scripts/smoke_archive_ops.py
 python scripts/smoke_console.py
 ```
-
-## Submission status
-
-Source, reproducible demo, validator results, and threat-model metadata
-are included. The public GitHub release, final brief, and externally
-viewable five-minute recording need the team's release step.
 
 ## Sprint demo commands
 
@@ -242,7 +388,7 @@ authenticated receipt implementation as the recovery archive. It does not
 consume live worker traffic. It retains synthetic or organizer practice event
 fields, so keep the entire state directory private, including its credential
 files. Archive receipts authenticate record provenance within this fixture.
-Portable historical ML-DSA evidence and producer renewal remain out of scope.
+Portable ML-DSA signatures for archive receipts and producer renewal remain out of scope. Separate baseline worker Evidence Passports are supported.
 
 
 ## Release verification
