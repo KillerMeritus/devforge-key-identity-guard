@@ -2,22 +2,46 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Recovery Console · DevForge</title>
+<title>Security Assurance Lab · DevForge</title>
 <link rel="stylesheet" href="/console.css">
 <main>
   <header class="masthead">
     <div class="brand"><span class="brand-mark"></span> DEVFORGE / TRACK 4</div>
     <nav aria-label="Console sections">
-      <a href="#recovery">Recovery</a><a href="#evidence-panel">Evidence</a><a href="#intelligence">Detection</a><a href="#archive-lab">Archive</a>
+      <a href="#scenario-lab">Scenarios</a><a href="#recovery">Recovery</a><a href="#evidence-panel">Evidence</a><a href="#intelligence">Detection</a><a href="#archive-lab">Archive</a>
     </nav>
   </header>
 
   <section class="heading">
     <p class="eyebrow">TWO-NODE SECURE FILE SERVICE</p>
-    <h1>Recovery Console<span>.</span></h1>
-    <p class="muted">Interrupt a key rotation and inspect what each node can serve after recovery.</p>
+    <h1>Security Assurance Lab<span>.</span></h1>
+    <p class="muted">Run a security scenario against fresh synthetic state and inspect the worker decisions.</p>
   </section>
 
+  <section class="panel" id="scenario-lab" aria-labelledby="lab-title">
+    <h2 id="lab-title">Security scenarios</h2>
+    <div class="controls">
+      <label>Scenario<select id="lab-choice">
+        <option value="revocation">Device revocation</option>
+        <option value="approval">Expired and consumed approvals</option>
+        <option value="competing">Competing rotations</option>
+        <option value="pre">Interrupt before commit</option>
+        <option value="post">Interrupt after commit</option>
+        <option value="backup">Damaged backup</option>
+        <option value="quarantine">Stale-state quarantine (experimental)</option>
+        <option value="passport">Evidence Passport verification</option>
+      </select></label>
+      <label>Passport challenge (optional, 64 lowercase hex digits)<input id="lab-challenge" maxlength="64" autocomplete="off"></label>
+      <button class="primary" id="run-lab">Run scenario</button>
+    </div>
+    <dl class="lab-spec">
+      <div><dt>Preconditions</dt><dd id="lab-preconditions"></dd></div>
+      <div><dt>Expected invariant</dt><dd id="lab-expected"></dd></div>
+      <div><dt>Affected nodes</dt><dd id="lab-nodes"></dd></div>
+    </dl>
+    <p id="lab-status" class="status" role="status">NOT TESTED</p>
+    <div id="lab-outcome"></div>
+  </section>
   <section id="recovery" aria-labelledby="recovery-title">
     <div class="section-title"><h2 id="recovery-title">Recovery Lab</h2><span class="label stable">BASELINE</span></div>
     <div class="controls">
@@ -48,7 +72,9 @@
 
   <section class="panel invariant-panel" aria-labelledby="invariant-title">
     <h2 id="invariant-title">Security invariants</h2>
-    <details><summary>Which authority supports each result?</summary>
+    <details><summary>System topology and trust</summary>
+    <p class="topology">Local judge → Scenario harness → Workers A and B → Shared SQLite</p>
+    <p class="topology">Workers → Independent revocation witness · Experimental workers → Separate evidence archive</p>
     <dl><dt>Baseline workers A and B</dt><dd>Both read the same SQLite authorization rows. The audit chain authenticates recorded decisions.</dd>
     <dt>Revocation witness</dt><dd>A separate checkpoint anchors revocation history across working-store restores.</dd>
     <dt>Worker signatures</dt><dd>Each node signs its own historical decision and verifier challenge. Recovery times come from the harness.</dd>

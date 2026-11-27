@@ -42,3 +42,27 @@ console.py serves the loopback console. A judge can enter a challenge and click 
 **Can another verifier trust a passport from last week?** It can authenticate a historical statement using a previously trusted key and independently expected bindings. Current authorization requires a new state check.
 
 **How representative are the detector numbers?** The cohorts are deterministic, labelled synthetic replays. A read one day later, a separate correlation ID, and two disconnected service edges each exposed an extra fallback correlation. These are regression cases, not field accuracy measurements.
+
+## Security Assurance Laboratory
+
+Run `python console.py` and open `http://127.0.0.1:8080`. The scenario selector
+runs eight allowlisted exercises against disposable local fixtures. The
+approval and competing-rotation runs show the observed version before and
+after on both workers, each rotation decision, and matching authenticated
+audit records. Revocation, backup, and passport exercises use the existing
+post-commit recovery harness. The scenario selector is separate from the
+synthetic detector replay.
+
+The passport exercise obtains each worker's signed revocation decision.
+The verifier uses the node public key provisioned by the local harness
+before worker startup. The interface exposes the challenge, request ID, node,
+public key, and signed bytes. A controlled copy changes the signed request
+version while preserving the signature, and the same verifier must reject
+that copy. The public key in this local view comes from the harness, so
+external verification still requires independently provisioned trust.
+Authentication applies to historical statements. The measured security
+invariants also depend on harness assertions and observations.
+
+The Evidence Explorer includes authenticated worker audit history from a
+completed recovery run. There is no continuous worker-audit monitor. The
+archive quarantine and historical receipt workflow remains experimental.

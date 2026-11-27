@@ -33,10 +33,10 @@ p { margin: 7px 0; }
 .cards { margin: 10px 0 16px; }
 .layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 label { display: block; color: var(--muted); font-size: .83rem; }
-button, select { font: inherit; }
-select, .primary, .secondary { margin-top: 5px; padding: 9px 12px; border-radius: 6px; border: 1px solid var(--line); }
-select, .primary { width: 100%; }
-select, .secondary { color: var(--ink); background: var(--surface); }
+button, select, .controls input { font: inherit; }
+select, .controls input, .primary, .secondary { margin-top: 5px; padding: 9px 12px; border-radius: 6px; border: 1px solid var(--line); }
+select, .controls input, .primary { width: 100%; }
+select, .controls input, .secondary { color: var(--ink); background: var(--surface); }
 .primary { background: var(--accent); color: #21190e; font-weight: 750; }
 button { cursor: pointer; }
 button:disabled { opacity: .62; cursor: wait; }
@@ -62,3 +62,11 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-
   .controls, .layout { grid-template-columns: 1fr; }
   .cards, .invariants { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.lab-spec { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; }
+.lab-spec dt { font-weight: 650; }
+.lab-spec dd { margin: .3rem 0 0; }
+#lab-outcome details { margin-block: .6rem; }
+#lab-outcome summary { cursor: pointer; }
+#lab-outcome pre { overflow: auto; max-height: 24rem; }
+.topology { overflow-wrap: anywhere; }

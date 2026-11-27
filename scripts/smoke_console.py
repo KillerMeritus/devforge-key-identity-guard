@@ -103,6 +103,72 @@ def main():
                 page.locator("#evidence-panel").scroll_into_view_if_needed()
                 capture("archive")
                 print("PASS archive: quarantine, retained historical evidence, and verified current recovery")
+                choice = page.locator("#lab-choice")
+                lab_status = page.locator("#lab-status")
+                lab_button = page.get_by_role("button", name="Run scenario", exact=True)
+
+                def exercise_lab(name):
+                    choice.select_option(name)
+                    with page.expect_response("**/run/lab/" + name, timeout=20000) as request:
+                        lab_button.click()
+                    assert request.value.status == 200
+                    expect(lab_status).to_contain_text("PASS")
+                    return request.value.json()["observations"]
+
+                lab_results = {name: exercise_lab(name) for name in
+                               ("revocation", "approval", "competing", "pre", "post", "backup", "quarantine")}
+                assert {item["denial_reason"] for item in lab_results["revocation"].values()} == {"revoked_device"}
+                initial = lab_results["approval"]
+                assert [item["reason"] for item in initial["outcomes"]] == [
+                    "approval_expired", "version_rotated", "approval_missing"
+                ]
+                repeated = exercise_lab("approval")
+                assert [item["reason"] for item in repeated["outcomes"]] == [
+                    item["reason"] for item in initial["outcomes"]
+                ]
+                assert {item["request_id"] for item in repeated["outcomes"]}.isdisjoint(
+                    item["request_id"] for item in initial["outcomes"]
+                )
+                assert sorted(item["status"] for item in lab_results["competing"]["outcomes"]) == [200, 403]
+                assert [lab_results[phase]["active_version"] for phase in ("pre", "post")] == [1, 2]
+                assert lab_results["backup"]["intact_accepted"] and not lab_results["backup"]["damaged_accepted"]
+                assert {item["status"] for item in lab_results["quarantine"]["quarantine"].values()} == {503}
+                page.locator("#scenario-lab").scroll_into_view_if_needed()
+                capture("scenario-approval")
+
+                choice.select_option("passport")
+                page.locator("#lab-challenge").fill("invalid")
+                with page.expect_response("**/run/lab/passport") as invalid:
+                    lab_button.click()
+                assert invalid.value.status == 400
+                expect(lab_status).to_contain_text("NOT TESTED")
+                challenge = "cad0" * 16
+                page.locator("#lab-challenge").fill(challenge)
+                passports = exercise_lab("passport")
+                for node, result in passports.items():
+                    assert result["node"] == node and result["challenge"] == challenge
+                    assert result["original"] == "STATEMENT AUTHENTICATED"
+                    assert result["modified"] == "REJECTED"
+                    assert result["statement"]["signature"] == result["modified_statement"]["signature"]
+                    assert result["statement"]["signed_bytes"] != result["modified_statement"]["signed_bytes"]
+                page.get_by_text("Node A · STATEMENT AUTHENTICATED", exact=False).click()
+                page.locator("#scenario-lab").scroll_into_view_if_needed()
+                capture("scenario-passport")
+                for code, expected in ((409, "FAIL"), (503, "UNAVAILABLE")):
+                    def fixture_failure(route):
+                        route.fulfill(status=code, json={"error": "Simulated fixture failure",
+                                                        "verification_failed": code == 409})
+                    page.route("**/run/lab/passport", fixture_failure)
+                    lab_button.click()
+                    expect(lab_status).to_contain_text(expected)
+                    expect(page.locator("#lab-outcome details")).to_have_count(0)
+                    page.unroute("**/run/lab/passport", fixture_failure)
+                with page.expect_response("**/run/lab/not-a-scenario") as invalid_route:
+                    page.evaluate("""fetch('/run/lab/not-a-scenario', {
+                        method: 'POST', headers: {'X-Recovery-Console': 'run'}
+                    })""")
+                assert invalid_route.value.status == 403
+                print("PASS all eight lab scenarios, repeat isolation, invalid input, and error presentation")
                 assert not errors, errors
                 browser.close()
         finally:

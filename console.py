@@ -7,7 +7,7 @@ import sys
 from urllib.parse import urlsplit
 
 from demo_cli import ScenarioAssertion, run
-from console_scenarios import detector_replay, time_machine
+from console_scenarios import LAB_SCENARIOS, assurance_lab, detector_replay, time_machine
 
 
 ORIGIN = "http://127.0.0.1:8080"
@@ -48,6 +48,9 @@ class Console(BaseHTTPRequestHandler):
         routes = {"/run/pre": lambda: run("pre", challenge_hex=challenge),
                   "/run/post": lambda: run("post", challenge_hex=challenge),
                   "/run/detection": detector_replay, "/run/archive": time_machine}
+        lab = self.path.removeprefix("/run/lab/")
+        if lab in LAB_SCENARIOS:
+            routes[f"/run/lab/{lab}"] = lambda: assurance_lab(lab, challenge)
         scenario = routes.get(self.path)
         if (
             self.headers.get("Host") != urlsplit(ORIGIN).netloc

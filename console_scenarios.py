@@ -1,5 +1,6 @@
 """Disposable local fixtures for the Recovery Console."""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from pathlib import Path
 import secrets
@@ -7,7 +8,7 @@ import sqlite3
 import tempfile
 import time
 
-from demo_cli import call, require, start
+from demo_cli import call, require, run, start
 from detection_cli import synthetic
 from kig_core.detector_archive import evidence_archive, replay
 from kig_core.guard import Guard
@@ -102,3 +103,95 @@ def time_machine():
                            "terminal_tag": terminal["tag"], "sequence": terminal["sequence"]},
             "recovered": recovered, "recovery_ms": elapsed,
         }
+
+
+
+def approval_lab(competing):
+    with tempfile.TemporaryDirectory(prefix="track4-approval-") as directory, ExitStack() as stack:
+        state = Path(directory)
+        keys = [secrets.token_bytes(32) for _ in range(3)]
+        for name, key in zip(("audit", "storage", "backup"), keys):
+            (state / f"{name}.key").write_bytes(key)
+        witness_path = state / "witness" / "checkpoint.sqlite"
+        witness_path.parent.mkdir()
+        witness = RevocationWitness(witness_path, keys[0])
+        witness.provision()
+        guard = Guard(state / "demo.sqlite", *keys, witness=witness)
+        admin, reader = guard.enroll("operator", "admin"), guard.enroll("teammate")
+        guard.seed_file("brief", b"synthetic approval lab", "teammate")
+        ports = {node: start(stack, state, node, state / f"{node}.log")[0] for node in ("A", "B")}
+        approval = guard.approve_rotation("operator", "brief", 1, time.time() + 120)
+
+        def observe(node, action, token, fields):
+            status, response, _ = call(ports[node], action, token, fields)
+            require(status == 200 or "body" not in response, "denial disclosed protected content")
+            return dict(node=node, status=status, reason=response.get("reason"),
+                        request_id=response.get("request_id"))
+
+        def read(node, version):
+            result = observe(node, "read", reader, {"target": "brief", "version": version})
+            return dict(result, requested_version=version)
+
+        def rotate(node, given_approval):
+            return observe(node, "rotate", admin,
+                           {"target": "brief", "version": 1, "approval": given_approval})
+
+        before = [read(node, 1) for node in ports]
+        require(all(item["status"] == 200 for item in before), "v1 unavailable before rotation")
+        if competing:
+            other = guard.approve_rotation("operator", "brief", 1, time.time() + 120)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(rotate, node, grant) for node, grant in zip(ports, (approval, other))]
+                outcomes = [future.result() for future in futures]
+            require({(item["status"], item["reason"]) for item in outcomes} ==
+                    {(200, "version_rotated"), (403, "wrong_version")}, "competing rotations did not serialize")
+        else:
+            expired = guard.approve_rotation("operator", "brief", 1, time.time() - 1)
+            outcomes = [rotate("A", expired), rotate("A", approval), rotate("B", approval)]
+            require([(item["status"], item["reason"]) for item in outcomes] ==
+                    [(403, "approval_expired"), (200, "version_rotated"), (403, "approval_missing")],
+                    "approval expiry or single-use invariant failed")
+        after = [read(node, version) for node in ports for version in (1, 2)]
+        require(all((item["status"], item["reason"]) ==
+                    ((200, "read") if item["requested_version"] == 2 else (403, "wrong_version"))
+                    for item in after), "workers disagree on the surviving version")
+        audit = {event["request_id"]: event for event in guard.evidence(admin)}
+        evidence = []
+        for outcome in outcomes:
+            event = audit.get(outcome["request_id"])
+            require(event is not None and event["node"] == outcome["node"]
+                    and event["reason"] == outcome["reason"]
+                    and event["allowed"] == (outcome["status"] == 200), "rotation audit mismatch")
+            evidence.append(event)
+        return dict(before=before, after=after, outcomes=outcomes, evidence=evidence)
+
+
+LAB_SCENARIOS = ("revocation", "approval", "competing", "pre", "post", "backup", "quarantine", "passport")
+
+
+def assurance_lab(name, challenge=None):
+    if name not in LAB_SCENARIOS:
+        raise ValueError("unknown lab scenario")
+    if name in ("approval", "competing"):
+        observations = approval_lab(competing=name == "competing")
+    elif name == "quarantine":
+        observations = time_machine()
+    else:
+        result = run("pre" if name == "pre" else "post", challenge_hex=challenge,
+                     verify_modified=name == "passport")
+        if name == "passport":
+            observations = {node: {"statement": record["passport"], **record["verification"]}
+                            for node, record in result["nodes"].items()}
+        elif name == "revocation":
+            observations = {node: {
+                "denial_status": record["revoked_status"], "denial_reason": record["revoked_reason"],
+                "teammate_status": record["teammate_status"], "statement": record["passport"],
+            } for node, record in result["nodes"].items()}
+        elif name == "backup":
+            observations = {**result["backup"],
+                            "evidence": [event for event in result["timeline"]
+                                         if event["label"] == "Damaged key backup rejected"]}
+        else:
+            observations = {key: result[key] for key in ("before", "active_version", "nodes",
+                                                         "recovery_ms", "cutoff", "timeline")}
+    return {"scenario": name, "status": "PASS", "observations": observations}

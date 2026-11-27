@@ -28,20 +28,21 @@ function row(parent, source, title, action) {
   byId(parent).append(button);
 }
 
-async function runScenario(route, statusId, checks, render) {
+async function runScenario(route, statusId, checks, render, challenge) {
   if (active) return;
   active = true;
-  const controls = ['run', 'run-detection', 'run-archive'].map(byId);
+  const controls = ['run', 'run-detection', 'run-archive', 'run-lab'].map(byId);
   controls.forEach(button => { button.disabled = true; });
   checks.forEach(check => state(check, 'PENDING'));
   text(statusId, 'Running the local scenario…');
   try {
     const response = await fetch('/run/' + route, {
-      method: 'POST', headers: {'X-Recovery-Console': 'run', ...(['pre','post'].includes(route) && byId('challenge').value ? {'X-Verification-Challenge': byId('challenge').value} : {})}
+      method: 'POST', headers: {'X-Recovery-Console': 'run', ...(challenge ? {'X-Verification-Challenge': challenge} : {})}
     });
     const result = await response.json();
     if (!response.ok) {
-      const error = new Error(result.error);
+      const error = new Error(response.status === 400 ? 'Use a 64-digit lowercase hexadecimal challenge.' : result.error);
+      error.invalidInput = response.status === 400;
       error.verificationFailed = result.verification_failed === true;
       throw error;
     }
@@ -51,7 +52,7 @@ async function runScenario(route, statusId, checks, render) {
     if (error.verificationFailed) {
       text(statusId, 'FAIL · ' + error.message);
     } else {
-      text(statusId, 'UNAVAILABLE · ' + error.message);
+      text(statusId, (error.invalidInput ? 'NOT TESTED' : 'UNAVAILABLE') + ' · ' + error.message);
     }
     if (checks.includes('revocation')) {
       allNodes.forEach(node => text('node' + node, 'Unavailable'));
@@ -113,7 +114,7 @@ byId('run').addEventListener('click', () => {
         reason: audit.reason, timestamp: audit.timestamp
       } : event));
     }
-  });
+  }, byId('challenge').value);
 });
 
 byId('run-detection').addEventListener('click', () => {
@@ -166,4 +167,81 @@ byId('run-archive').addEventListener('click', () => {
         ' · revoked ' + recovered.revoked.status, () => showEvidence('Verified current snapshot', recovered));
     }
   });
+});
+
+const labSpecs = {
+  revocation: ['Two granted devices before revocation.', 'Both workers explicitly deny the revoked device and serve the teammate.', 'A and B'],
+  approval: ['Version 1, one expired and one active approval.', 'An expired approval fails, an active approval rotates once, and reuse fails.', 'A and B'],
+  competing: ['Version 1 and two approvals bound to that version.', 'Exactly one competing rotation commits. Both workers serve v2 and reject v1.', 'A and B'],
+  pre: ['Version 1 and a rotation paused before commit.', 'After terminating and restarting A, both nodes retain v1 and preserve revocation.', 'A restarted, B observed'],
+  post: ['Version 1 and a rotation paused after commit.', 'After terminating and restarting A, both nodes serve v2 and reject v1.', 'A restarted, B observed'],
+  backup: ['Authenticated backup of the committed key version and a one-byte changed copy.', 'Accept the original backup and reject the damaged copy.', 'Node A verification'],
+  quarantine: ['Experimental archive fixture restored to a stale working snapshot.', 'Both nodes deny access while stale and preserve revocation after verified restore.', 'A and B · experimental'],
+  passport: ['Two worker statements and public keys provisioned independently of the envelopes.', 'Authenticate each original statement and reject a copy with a changed signed version.', 'A and B']
+};
+
+function updateLabSpec() {
+  const scenario = byId('lab-choice').value;
+  const [pre, expected, nodes] = labSpecs[scenario];
+  byId('lab-challenge').disabled = scenario !== 'passport';
+  text('lab-preconditions', pre);
+  text('lab-expected', expected);
+  text('lab-nodes', nodes);
+  text('lab-status', 'NOT TESTED');
+  byId('lab-outcome').replaceChildren();
+}
+byId('lab-choice').addEventListener('change', updateLabSpec);
+updateLabSpec();
+
+function labRecord(title, record) {
+  const details = document.createElement('details');
+  const summary = document.createElement('summary');
+  summary.textContent = title;
+  const data = document.createElement('pre');
+  data.textContent = JSON.stringify(record, null, 2);
+  details.append(summary, data);
+  byId('lab-outcome').append(details);
+}
+
+byId('run-lab').addEventListener('click', async () => {
+  if (active) return;
+  const choice = byId('lab-choice');
+  const name = choice.value;
+  const challenge = name === 'passport' ? byId('lab-challenge').value : undefined;
+  choice.disabled = true;
+  byId('lab-outcome').replaceChildren();
+  try {
+    await runScenario('lab/' + name, 'lab-status', [], result => {
+      const data = result.observations;
+      if (name === 'passport') {
+        for (const node of allNodes) {
+          const {statement, modified_statement, trusted_public_key_base64, ...inputs} = data[node];
+          labRecord('Node ' + node + ' · ' + inputs.original + ' · modified copy ' + inputs.modified, inputs);
+          labRecord('Node ' + node + ' independently provisioned public key', {trusted_public_key_base64});
+          labRecord('Node ' + node + ' original signed statement', statement);
+          labRecord('Node ' + node + ' controlled modified copy', modified_statement);
+        }
+        text('lab-status', result.status + ' · Historical statement authentication and modified-copy rejection');
+      } else if (data.before) {
+        labRecord('Before · observed starting state', data.before);
+        labRecord('After · observed worker state', data.after || data.nodes);
+        const {before, after, nodes, ...remaining} = data;
+        labRecord('Supporting decisions and evidence', remaining);
+        text('lab-status', result.status + (data.active_version ? ' · Recovered v' + data.active_version : ' · Both workers observed'));
+      } else {
+        if (name === 'revocation') {
+          for (const node of allNodes) labRecord('Node ' + node + ' · HTTP ' + data[node].denial_status + ' · ' + data[node].denial_reason, data[node]);
+        } else if (name === 'quarantine') {
+          labRecord('Before verified restore · quarantined nodes', data.quarantine);
+          labRecord('After verified restore · worker outcomes', data.recovered);
+          labRecord('Retained historical receipt', data.historical);
+        } else {
+          labRecord('Backup verification · original accepted, damaged copy rejected', data);
+        }
+        text('lab-status', result.status + ' · Expected outcome observed');
+      }
+    }, challenge);
+  } finally {
+    choice.disabled = false;
+  }
 });

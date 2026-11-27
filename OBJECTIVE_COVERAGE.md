@@ -28,3 +28,13 @@ The organizer adapter checks are mapped individually in [Adapter contract covera
 | Persisted-state integrity | tests/test_security_matrix.py deletes grant, credential, approval and asset rows independently of audit history | Baseline trusts direct database writers. Experimental archive compares supported current projections. |
 | Causal detection | tests/test_architecture.py exercises independent flows, day-separated events, disconnected edges and approval boundaries | 30-second event-time policy. Finite synthetic replay. |
 | Verifiable decisions | evidence_passport.py, tests/test_architecture.py and the Chromium challenge scenario | Original signed bytes, pinned node key, verifier challenge and request binding. Historical worker decisions for revocation, teammate reads and post-commit retired-version denial. Process termination and timings are harness observations. |
+
+## Judge-facing execution
+
+The local Security Assurance Lab exposes baseline revocation, approval expiry
+and consumption, competing rotations, both process-kill boundaries, backup
+verification, and historical worker-statement authentication. Stale-state
+quarantine uses the experimental archive. The Chromium smoke test executes
+all eight choices, repeats the approval fixture with fresh request identities,
+and checks actual modified-copy rejection. Its simulated HTTP error responses
+exercise interface presentation. The detector remains a separate synthetic replay.

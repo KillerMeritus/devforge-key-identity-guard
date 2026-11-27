@@ -95,7 +95,7 @@ def start(stack, state, node, log, port=None, checkpoint=None, *, archive=False)
     return port, process
 
 
-def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None):
+def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_modified=False):
     timeline = []
 
     def event(source, label, **fields):
@@ -147,7 +147,7 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None):
             require(status == 200 and base64.b64decode(result["body"]) == BODY, "file contents changed")
             return {**result, "http_status": status}
 
-        checked_read(b, teammate, 1)
+        before = checked_read(b, teammate, 1)
         client = MLKEM768PrivateKey.generate()
         challenge = "demo✓"
         public = base64.b64encode(client.public_key().public_bytes_raw()).decode()
@@ -286,6 +286,27 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None):
             }
             observed_nodes[name]["signed_request"] = revoked_request_id
             observed_nodes[name]["challenge"] = challenge
+            if verify_modified:
+                original = passports["revoked-device"]
+                modified_bytes = json.loads(base64.b64decode(original["signed_bytes"], validate=True))
+                modified_bytes["event"]["version"] += 1
+                modified = dict(
+                    original, event=modified_bytes["event"],
+                    signed_bytes=base64.b64encode(json.dumps(
+                        modified_bytes, sort_keys=True, separators=(",", ":")
+                    ).encode()).decode(),
+                )
+                require(not verify_passport(modified, trusted_public_keys[name], name, challenge,
+                                            revoked_request_id), "modified worker statement authenticated")
+                observed_nodes[name]["verification"] = {
+                    "node": name, "challenge": challenge, "request_id": revoked_request_id,
+                    "trusted_public_key_base64": base64.b64encode(trusted_public_keys[name]).decode(),
+                    "key_source": "Local harness provisioning before worker startup",
+                    "original": "STATEMENT AUTHENTICATED",
+                    "modified": "REJECTED",
+                    "modified_fields": {"recorded_request_version": modified["event"]["version"]},
+                    "modified_statement": modified,
+                }
             event(name, "ML-DSA-65 revocation evidence authenticated", request_id=revoked_request_id)
         evidence = guard.evidence(operator)
         commits = [row for row in evidence if row["reason"] == "version_rotated"]
@@ -293,9 +314,11 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None):
         if commits:
             event("Audit", "Rotation committed", request_id=commits[0]["request_id"], version=expected)
         backup = guard.backup("brief", expected)
-        require(guard.verify_backup("brief", expected, backup, "A"), "intact backup rejected")
+        intact_accepted = guard.verify_backup("brief", expected, backup, "A")
+        require(intact_accepted, "intact backup rejected")
         damaged = backup[:-1] + bytes([backup[-1] ^ 1])
-        require(not guard.verify_backup("brief", expected, damaged, "A"), "damaged backup accepted")
+        damaged_accepted = guard.verify_backup("brief", expected, damaged, "A")
+        require(not damaged_accepted, "damaged backup accepted")
         checked_read(a, teammate, expected)
         event("Audit", "Damaged key backup rejected")
         status, response, headers = call(a, "message", operator, {})
@@ -306,7 +329,11 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None):
         require(call(b, f"evidence/{mismatch['request_id']}", teammate)[0] == 403, "audit disclosed")
         require(call(b, "config/clock-tolerance")[1] == {"tolerance_seconds": 5}, "bad clock config")
         return dict(checkpoint=phase, active_version=expected, timeline=timeline,
+                    before={"node": "B", "version": 1, "status": before["http_status"],
+                            "request_id": before["request_id"]},
                     last_denial_ms=round(max(timings.values()), 2), recovery_ms=round(recovery_ms, 2),
+                    backup={"node": "A", "version": expected, "intact_accepted": intact_accepted,
+                            "damaged_accepted": damaged_accepted},
                     evidence=guard.evidence(operator), proof_verified=True, audit_verified=True,
                     continuity=continuity_results, nodes=observed_nodes, cutoff=cutoff,
                     revocation_ms={node: round(delay, 2) for node, delay in timings.items()})
