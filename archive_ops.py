@@ -7,6 +7,8 @@ import secrets
 import sqlite3
 import stat
 
+from cryptography.exceptions import InvalidTag
+
 from kig_core.archive import ArchiveConflict, ArchiveDenied, ArchiveUnavailable
 from kig_core.guard import Guard
 from kig_core.witness import RevocationWitness
@@ -35,6 +37,8 @@ def main():
     provision = commands.add_parser("provision")
     provision.add_argument("investigator_credential", type=Path)
     commands.add_parser("status")
+    export = commands.add_parser("export")
+    export.add_argument("snapshot", type=Path)
     restore = commands.add_parser("restore")
     restore.add_argument("snapshot", type=Path)
     authorize = commands.add_parser("authorize-recovery")
@@ -61,7 +65,10 @@ def main():
             output = {"status": "archive_provisioned"}
         else:
             coordinator = ArchivedGuard(existing_guard(args.state), args.state)
-            if args.action == "restore":
+            if args.action == "export":
+                coordinator.export_verified(args.snapshot)
+                output = {"status": "verified_encrypted_snapshot_exported"}
+            elif args.action == "restore":
                 coordinator.restore_verified(args.snapshot)
                 output = {"status": "verified_snapshot_restored"}
             elif args.action == "authorize-recovery":
@@ -78,7 +85,7 @@ def main():
                 receipt = coordinator.recover(read_credential(args.recovery_credential), args.pending_tag)
                 output = {key: receipt[key] for key in ("state", "tag", "producer", "recovery_actor")
                           if key in receipt}
-    except (ArchiveConflict, ArchiveDenied, ArchiveUnavailable, OSError, ValueError, sqlite3.Error) as error:
+    except (InvalidTag, ArchiveConflict, ArchiveDenied, ArchiveUnavailable, OSError, ValueError, sqlite3.Error) as error:
         parser.exit(1, f"Archive operation failed ({type(error).__name__})\n")
     print(json.dumps(output, sort_keys=True))
 

@@ -122,3 +122,31 @@ witness checks and authenticated audit reads. Audit-to-observation time uses
 same-host wall-clock timestamps and includes scenario scheduling. The
 observation-to-alert measurement uses a monotonic clock and measures local
 classification through creation of the finding, before browser delivery.
+
+## Verified encrypted asset recovery
+
+In archive mode, an operator can export a transaction-consistent working
+snapshot and later restore it against the current independent evidence store.
+
+```sh
+python archive_ops.py --state /path/to/state export /private/path/current.sqlite
+python archive_ops.py --state /path/to/state restore /private/path/current.sqlite
+```
+
+Export checks the independent archive, working audit and commit markers,
+current credential/grant/approval/asset projections, and the authenticated
+ciphertext of each asset. It publishes a private SQLite file without
+overwriting an existing destination. Asset bytes stay encrypted. The
+snapshot contains sensitive working metadata, so restrict its storage
+and transport. Keys and the independent archive stay separate and must
+survive recovery.
+
+Restore accepts the same retained checkpoint only. A later recorded
+operation can make a backup stale even if the encrypted bytes are
+unchanged. Restore refuses unresolved pending operations and stale
+snapshots. For a missing working database, stop both workers and ensure
+SQLite sidecars from the missing database are absent before restoring.
+Keep the working state directory, keys, revocation witness and archive.
+This procedure recovers the complete encrypted working store. Baseline
+continues to trust direct database writers. Archive mode provides the
+independent current-state and rollback checks.

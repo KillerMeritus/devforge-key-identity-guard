@@ -9,6 +9,7 @@ from pathlib import Path
 import secrets
 import sqlite3
 import stat
+import tempfile
 import time
 
 from .archive import Archive, ArchiveConflict, ArchiveUnavailable, GENESIS, canonical, identifier, outcome_schema
@@ -533,6 +534,53 @@ class ArchivedGuard:
                 self.verify(db, records, initial)
             return terminal
 
+    def verify_asset_ciphertexts(self, db):
+        """Authenticate every asset without exporting its decrypted contents."""
+        for name, body, version in db.execute("SELECT id,body,version FROM files"):
+            remaining = deadline.get()
+            if remaining is not None and time.monotonic() >= remaining:
+                raise ArchiveUnavailable("asset verification timed out")
+            self.guard.decrypt(name, version, body)
+
+    @staticmethod
+    def copy_snapshot(source, destination):
+        end = deadline.get()
+
+        def check_progress(_status, _remaining, _total):
+            if time.monotonic() >= end:
+                raise ArchiveUnavailable("verified snapshot copy timed out")
+
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise ArchiveUnavailable("verified snapshot copy timed out")
+        with closing(sqlite3.connect(destination.as_uri() + "?mode=rw", uri=True,
+                                     timeout=remaining)) as copy:
+            copy.execute("PRAGMA synchronous=FULL")
+            source.backup(copy, pages=100, progress=check_progress, sleep=0.01)
+
+    def publish_snapshot(self, source, destination):
+        with tempfile.TemporaryDirectory(prefix=".devforge-snapshot-", dir=destination.parent) as tmp:
+            staged = Path(tmp) / "snapshot.sqlite"
+            private_write(staged, b"")
+            self.copy_snapshot(source, staged)
+            os.link(staged, destination)
+            fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+    def export_verified(self, snapshot):
+        """Publish a private, complete encrypted working snapshot without replacing a file."""
+        destination = Path(snapshot).absolute()
+        if os.path.lexists(destination):
+            raise FileExistsError(destination)
+        with store_lock(self.directory), self.guard.transaction(write=False, archive=True) as db:
+            with self.archive.verified(write=False) as (_, records, _, initial):
+                self.verify(db, records, initial)
+                self.verify_asset_ciphertexts(db)
+            self.publish_snapshot(db, destination)
+
     def restore_verified(self, snapshot):
         """Restore a snapshot only if it matches the current retained state."""
         self.guard.require_mode(archive=True)
@@ -545,16 +593,10 @@ class ArchivedGuard:
                 self.guard.witness.check(db)
             with self.archive.verified(write=False) as (_, records, _, initial):
                 self.verify(db, records, initial)
-            end = deadline.get()
-
-            def check_progress(_status, _remaining, _total):
-                if time.monotonic() >= end:
-                    raise ArchiveUnavailable("verified restore timed out")
-
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                raise ArchiveUnavailable("verified restore timed out")
-            with closing(sqlite3.connect(destination.as_uri() + "?mode=rw", uri=True,
-                                         timeout=remaining)) as live:
-                live.execute("PRAGMA synchronous=FULL")
-                db.backup(live, pages=100, progress=check_progress, sleep=0.01)
+                self.verify_asset_ciphertexts(db)
+            if os.path.lexists(destination):
+                self.copy_snapshot(db, destination)
+            else:
+                if any(os.path.lexists(str(destination) + suffix) for suffix in ("-wal", "-shm", "-journal")):
+                    raise ArchiveUnavailable("missing working database has SQLite sidecars")
+                self.publish_snapshot(db, destination)

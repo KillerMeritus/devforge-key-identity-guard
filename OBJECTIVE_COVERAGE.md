@@ -45,3 +45,18 @@ claims with both workers' signed statements. Live monitoring observes actual
 authenticated baseline audit records during the controlled fixtures, separately
 from synthetic detector inputs. Containment is confirmed only when the
 matching HTTP denial withheld protected content.
+
+## Deep assurance review candidate
+
+Archive-mode current-state checks were exercised for credential, grant,
+approval, and ciphertext changes with the original audit history retained.
+The recovery regression covers offline archive export, refusal of stale
+rotation snapshots, quarantine on both workers after working-state rollback,
+and restore into a missing database. The HTTP worker reference matrix
+derives decisions from fixture policy rather than database rows. Direct
+Python lab checks cover repeated approvals, competing rotations, damaged
+backup rejection and Evidence Passport negative verification.
+
+Archive verification is bounded to the configured record capacity. See
+the review evidence benchmark for measured costs up to 920 records.
+Baseline retains its documented direct-database-writer trust assumption.

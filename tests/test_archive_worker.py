@@ -1,3 +1,5 @@
+import base64
+from itertools import product
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 import json
@@ -356,3 +358,92 @@ class ArchiveWorkerTest(unittest.TestCase):
                 status, result = self.read(port, 2)
                 self.assertEqual(status, 503)
                 self.assertNotIn("body", result)
+
+    def test_verified_export_restores_missing_working_store_and_refuses_stale_rotation(self):
+        coordinator = ArchivedGuard(self.guard, self.state)
+        stale = self.state / "pre-rotation.sqlite"
+        current = self.state / "current.sqlite"
+        cli = Path(WORKER).with_name("archive_ops.py")
+        exported = subprocess.run(
+            [sys.executable, str(cli), "--state", str(self.state), "export", str(stale)],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        self.assertEqual(json.loads(exported.stdout)["status"], "verified_encrypted_snapshot_exported")
+        self.assertEqual(stale.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(b"synthetic rotation input", stale.read_bytes())
+        with self.assertRaises(FileExistsError):
+            coordinator.export_verified(stale)
+
+        with ExitStack() as stack:
+            a, _ = start(stack, self.state, "A", self.state / "export-a.log", archive=True)
+            self.assertEqual(self.rotate(a, "backup-rotation", self.approvals[0])[0], 200)
+        coordinator.export_verified(current)
+        with self.assertRaises(ArchiveUnavailable):
+            coordinator.restore_verified(stale)
+
+        with closing(sqlite3.connect(stale)) as old, closing(sqlite3.connect(self.working_path)) as live:
+            old.backup(live)
+        with ExitStack() as stack:
+            for node in ("A", "B"):
+                port, _ = start(stack, self.state, node, self.state / f"rolled-back-{node}.log",
+                                archive=True)
+                status, response = self.read(port, 1)
+                self.assertEqual(status, 503)
+                self.assertNotIn("body", response)
+        coordinator.restore_verified(current)
+
+        # Test each integrity domain with genuine audit metadata retained.
+        for mutation, values in (
+            ("UPDATE devices SET role='admin' WHERE token=?", (self.guard.digest(self.reader),)),
+            ("DELETE FROM grants WHERE actor='reader' AND file='brief'", ()),
+            ("UPDATE approvals SET version=2 WHERE id=?", (self.approvals[1],)),
+            ("UPDATE files SET body=? WHERE id='brief'", (b"corrupt",)),
+        ):
+            with self.subTest(mutation=mutation):
+                with closing(sqlite3.connect(self.working_path)) as db, db:
+                    self.assertEqual(db.execute(mutation, values).rowcount, 1)
+                with self.assertRaises(ArchiveUnavailable):
+                    coordinator.export_verified(self.state / "refused.sqlite")
+                self.assertFalse((self.state / "refused.sqlite").exists())
+                coordinator.restore_verified(current)
+
+        self.working_path.unlink()
+        restored = subprocess.run(
+            [sys.executable, str(cli), "--state", str(self.state), "restore", str(current)],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        self.assertEqual(json.loads(restored.stdout)["status"], "verified_snapshot_restored")
+        self.assertEqual(self.active_state(), (2, {self.approvals[1]}))
+        with ExitStack() as stack:
+            for node in ("A", "B"):
+                port, _ = start(stack, self.state, node, self.state / f"recovered-{node}.log", archive=True)
+                old_status, old_result = self.read(port, 1)
+                status, result = self.read(port, 2)
+                self.assertEqual((old_status, old_result["reason"]), (403, "wrong_version"))
+                self.assertEqual(status, 200)
+                self.assertEqual(base64.b64decode(result["body"]), b"synthetic rotation input")
+
+    def test_two_worker_access_decisions_match_reference_model(self):
+        # The model is built from fixture policy. It never reads the service database.
+        roles = {"reader": self.reader, "operator": self.operator, "unregistered": "unregistered"}
+        with ExitStack() as stack:
+            ports = [start(stack, self.state, node, self.state / f"model-{node}.log", archive=True)[0]
+                     for node in ("A", "B")]
+            for active_version in (1, 2):
+                if active_version == 2:
+                    self.assertEqual(self.rotate(ports[0], "model-rotation", self.approvals[0])[0], 200)
+                for port, actor, version in product(ports, roles, (1, 2)):
+                    expected = (
+                        (401, "invalid_device") if actor == "unregistered" else
+                        (403, "missing_grant") if actor == "operator" else
+                        (403, "wrong_version") if version != active_version else (200, "read")
+                    )
+                    status, body, _ = call(port, "read", roles[actor], {"target": "brief", "version": version})
+                    self.assertEqual((status, body["reason"]), expected)
+                    self.assertEqual("body" in body, status == 200)
+            self.assertEqual(call(ports[1], "revoke", self.operator, {"target": self.guard.digest(self.reader)},
+                                  idempotency_key="model-revoke")[0], 200)
+            for port, version in product(ports, (1, 2)):
+                status, body = self.read(port, version)
+                self.assertEqual((status, body["reason"]), (403, "revoked_device"))
+                self.assertNotIn("body", body)
