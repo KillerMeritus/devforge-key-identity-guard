@@ -1,94 +1,234 @@
-# Recovery Console | DevForge Track 4
+<div align="center">
 
-A local security assurance laboratory for protected files: device revocation,
-atomic key rotation, crash recovery, authenticated audit evidence and security
-monitoring. Two independently running worker processes share one SQLite
-authority on the same host.
+# Recovery Console
 
-**Start here:** the browser demo needs only Python and the pinned dependencies.
-No API keys, cloud account, database server, Node.js, npm, or manual credentials
-are required. All demonstration data and credentials are generated in disposable
-local fixtures.
+**Security Assurance Laboratory · DevForge Track 4**
 
-## 1. Install (Linux, Python 3.12)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB)
+![AES-GCM](https://img.shields.io/badge/Encryption-AES--GCM-087F82)
+![ML-KEM and ML-DSA](https://img.shields.io/badge/Post--quantum-ML--KEM%20%2F%20ML--DSA-087F82)
 
-The release was verified on x86_64 Linux with Python 3.12.14. Use a Linux terminal
-(or Linux inside WSL2 on Windows; native Windows was not verified). Git, Python
-3.12, its venv module and pip must be available. Internet access is needed for
-the initial clone and dependency installation unless the files and wheels have
-already been staged.
+Protect files. Revoke devices. Recover from interrupted rotations. Verify the evidence.
 
-Copy these commands into a terminal:
+[Quick start](#quick-start) · [Try the demo](#try-the-demo) · [Automated assessment](#automated-assessment) · [Architecture](#architecture) · [Troubleshooting](#troubleshooting)
 
-```sh
+</div>
+
+## Quick start
+
+Choose your operating system below. You only need Git, Python 3.12 and a browser.
+No API keys, npm, cloud services, database server or manual worker setup.
+
+| Operating system | Setup |
+| --- | --- |
+| macOS | Native POSIX setup instructions; not yet independently verified on macOS |
+| Windows | Ubuntu 24.04 through WSL2; native Windows is not supported by this guide |
+| Linux | Recommended; release tested on x86_64 Linux, Python 3.12.14 |
+
+<details open>
+<summary><b>macOS — install and launch</b></summary>
+
+### Step 1 — Install Python and Git
+
+Open Terminal. If you do not have Homebrew, follow the instructions at [brew.sh](https://brew.sh/).
+
+```bash
+brew install python@3.12 git
+```
+
+### Step 2 — Download and install
+
+```bash
 git clone https://github.com/KillerMeritus/devforge-key-identity-guard.git
 cd devforge-key-identity-guard
-python3.12 --version
 python3.12 -m venv .venv
-. .venv/bin/activate
+source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m pip check
 ```
 
-Expected: Python reports 3.12.x, installation exits successfully, and pip check
-reports no broken requirements. Use the exact versions in
-[requirements.txt](requirements.txt); do not substitute older crypto libraries.
+### Step 3 — Start
 
-Already have a checkout? Start in its repository root and skip the clone and cd
-commands. In every new terminal, change to that root and activate the same
-environment with `. .venv/bin/activate`.
-
-## 2. Run the application (recommended for judges)
-
-From the repository root, with the virtual environment activated:
-
-```sh
+```bash
 python console.py
 ```
 
-Expected terminal output: `Recovery Console: http://127.0.0.1:8080`.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
 
-Open **[http://127.0.0.1:8080](http://127.0.0.1:8080)** in a modern browser.
-Keep the terminal running. Use this exact address, not localhost, because the
-console enforces its loopback Host and Origin.
+macOS is a proposed native setup, not a tested release platform. If pinned
+crypto dependencies or scenarios fail, use a Linux VM with the Linux instructions
+below rather than downgrading dependencies.
 
-No separate worker startup is needed. Selecting a scenario starts the necessary
-local worker processes and creates fresh synthetic state automatically. Stop the
-console with Ctrl+C in the terminal when finished.
+</details>
 
-### What to demonstrate
+<details>
+<summary><b>Windows — install and launch using WSL2</b></summary>
 
-| Console section | Action | Expected result |
-|---|---|---|
-| Security scenarios | Select Device revocation and run | Both workers explicitly deny the revoked device (403); teammate access succeeds (200). |
-| Security scenarios | Select Expired and consumed approvals, or Competing rotations | Invalid or reused approval denied; only an eligible rotation commits. |
-| Recovery Lab | Select Before commit, predict v1, run | Real process termination and restart; v1 survives, revocation remains effective. |
-| Recovery Lab | Select After commit, predict v2, run | v2 survives, v1 is denied, revocation remains effective. |
-| Security scenarios | Select Damaged backup | Intact key backup accepted, damaged copy rejected. |
-| Security scenarios | Select Evidence Passport verification | Original worker statements authenticate; modified copies are rejected; historical claims are appraised. An optional judge challenge must be exactly 64 lowercase hexadecimal digits. |
-| Operational audit monitor | Run monitored fixtures | Authenticated findings and matching denied-response containment observations stream during controlled runs. |
-| Detection View | Run the synthetic replay | Contextual findings and clock-uncertainty notes with source references. |
-| Security Time Machine / stale-state quarantine | Run the experimental scenario | Stale state returns 503; verified-current restore preserves legitimate access and revocation. |
+### Step 1 — Install Ubuntu
 
-The baseline Recovery Lab is the recommended competition path. Experimental
-archive features have additional trust and availability constraints described
-below. HTTP 503 is fail-closed unavailability, not an explicit revocation denial.
+Open **PowerShell as Administrator** on a supported Windows 10/11 system.
 
-## 3. Run without a browser
+```powershell
+wsl --install -d Ubuntu-24.04
+```
 
-No browser or organizer toolkit is needed for these commands:
+Restart Windows if prompted. Open **Ubuntu 24.04** from the Start menu and
+complete the initial username/password setup. If needed, run
+`wsl --list --online` in PowerShell to confirm the distribution name.
 
-```sh
+### Step 2 — Install Python and Git
+
+Run the remaining commands in the **Ubuntu terminal**, not PowerShell.
+
+```bash
+sudo apt update
+sudo apt install -y git python3.12 python3.12-venv
+cd ~
+```
+
+### Step 3 — Download and install
+
+```bash
+git clone https://github.com/KillerMeritus/devforge-key-identity-guard.git
+cd devforge-key-identity-guard
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+### Step 4 — Start
+
+```bash
+python console.py
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) in your Windows browser.
+Keep the Ubuntu terminal running. WSL localhost forwarding must be enabled.
+
+The project uses POSIX process termination and locking. Do not run the native
+Windows Python interpreter for this demonstration.
+
+</details>
+
+<details>
+<summary><b>Linux — install and launch (Ubuntu 24.04)</b></summary>
+
+### Step 1 — Install Python and Git
+
+```bash
+sudo apt update
+sudo apt install -y git python3.12 python3.12-venv
+```
+
+Other Linux distributions: install Git, Python 3.12 and venv using your package manager.
+
+### Step 2 — Download and install
+
+```bash
+git clone https://github.com/KillerMeritus/devforge-key-identity-guard.git
+cd devforge-key-identity-guard
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+### Step 3 — Start
+
+```bash
+python console.py
+```
+
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
+
+</details>
+
+### You're ready
+
+Expected terminal output:
+
+```text
+Recovery Console: http://127.0.0.1:8080
+```
+
+Use this exact URL (not localhost). Keep the terminal open. The application
+automatically starts local workers and creates disposable synthetic data when
+you select a scenario. Stop it with Ctrl+C.
+
+**Already installed?** In your macOS, Linux or Ubuntu terminal:
+
+```bash
+cd devforge-key-identity-guard
+source .venv/bin/activate
+python console.py
+```
+
+Run this from the directory containing your checkout, or use its absolute path.
+
+## Try the demo
+
+Start with the **Recovery Lab**. Predict the surviving version, run the scenario,
+then inspect the actual evidence.
+
+| Try this | Expected outcome |
+|---|---|
+| Before commit | v1 survives the process kill |
+| After commit | v2 survives; new v1 requests are rejected |
+| Device revocation | Both workers deny the revoked device; teammate access remains |
+| Expired or consumed approvals | Invalid approval rejected |
+| Competing rotations | One eligible rotation commits |
+| Damaged backup | Original accepted; damaged copy rejected |
+| Evidence Passport | Original historical statements authenticate; modified copy rejected |
+| Operational audit monitor | Authenticated findings and observed denial containment |
+| Detection View | Synthetic contextual findings and clock uncertainty |
+| Security Time Machine (experimental) | Stale state quarantined; eligible current snapshot restored |
+
+HTTP 200 = allowed. HTTP 403 = explicit denial. HTTP 503 = unavailable / fail closed.
+The baseline Recovery Lab is the recommended judging path.
+
+<details>
+<summary><b>Run without a browser</b></summary>
+
+```bash
 python demo_cli.py --kill-at pre
 python demo_cli.py --kill-at post
 python detection_cli.py
 ```
 
-Expected: the first two commands finish with PASS and recovered v1 and v2,
-respectively. The detector emits a JSON report for synthetic events.
-Use `--json` on either recovery command for machine-readable evidence.
+The first two commands finish with PASS and recovered v1 and v2 respectively.
+Add `--json` to export recovery results.
 
-## 4. Organizer automated assessment
+</details>
+
+## Architecture
+
+```mermaid
+flowchart TD
+    J[Organizer sandbox] --> AD[track4_service.py]
+    AD --> JS[(Isolated judge state)]
+    U[Local browser] --> C[console.py]
+    C --> A[Worker A]
+    C --> B[Worker B]
+    A --> DB[(Shared SQLite working store)]
+    B --> DB
+    A --> W[Separate revocation witness]
+    B --> W
+    A -. Experimental mode .-> E[Independent evidence archive]
+    B -. Experimental mode .-> E
+    A --> P[Historical signed statements]
+    B --> P
+    P --> V[Offline claim verifier]
+```
+
+Two worker processes run on one host, not a distributed cluster.
+The organizer adapter is a separate execution path.
+
+## Automated assessment
+
+<details>
+<summary><b>Official adapter and validator commands</b></summary>
+
 
 The official entry point is [track4_service.py](track4_service.py), in the
 repository root. It accepts one UTF-8 JSON request on stdin and emits one JSON
@@ -116,7 +256,13 @@ If the toolkit is already cloned, skip its clone command and set
 checks and “Local scenario passed”. This public validator does not establish
 hidden-assessment results.
 
-## 5. Run the release checks
+</details>
+
+## Testing
+
+<details>
+<summary><b>Full release checks and optional browser testing</b></summary>
+
 
 Run from the repository root with the virtual environment active. The toolkit
 is only needed for the public validator and organizer practice fixtures.
@@ -152,7 +298,13 @@ On Linux, Chromium may also require system libraries; follow Playwright's
 dependency-installation guidance for your distribution. If Chromium is
 already installed, use `python scripts/smoke_console.py --chromium /path/to/chromium`.
 
-## 6. Offline installation and troubleshooting
+
+</details>
+## Troubleshooting
+
+<details>
+<summary><b>Offline installation and common problems</b></summary>
+
 
 For offline installation, stage compatible wheels on a connected Linux machine
 with the same Python version and architecture before going offline:
@@ -181,7 +333,9 @@ be staged separately.
 | Toolkit path not found | Use the absolute path to the separately cloned toolkit. |
 | Browser smoke cannot launch Chromium | Install Playwright's Chromium and its system dependencies, or supply an existing Chromium executable. |
 
-## 7. Technical documentation
+
+</details>
+## Technical documentation
 
 - [Project overview](PROJECT_OVERVIEW.md)
 - [Official objective coverage](OBJECTIVE_COVERAGE.md)
@@ -196,7 +350,11 @@ The following sections describe the advanced architecture, manual archive
 operation and additional verification commands. They are not required to
 launch the standard demonstration.
 
-## Design and evidence limits
+
+<details>
+<summary><b>Advanced architecture, cryptography, archive commands and security boundaries</b></summary>
+
+### Design and evidence limits
 
 - The organizer's actor-level API and the demo's device-level API share
   SQLite transaction helpers. The judge uses the caller identity supplied
@@ -243,7 +401,7 @@ launch the standard demonstration.
   does not establish production security, offline host recovery, or
   messaging features such as forward secrecy.
 
-## Post-quantum audit verification
+### Post-quantum audit verification
 
 The local demo provisions a separate ML-DSA-65 signing seed for each
 worker and pins each public key to its node at setup. After recovery the
@@ -258,7 +416,7 @@ in the private demo state directory. It does not demonstrate process-level
 key isolation. ML-KEM-768 handles the
 organizer's separate protected-read exchange.
 
-## Revocation survives old snapshots
+### Revocation survives old snapshots
 
 The demo provisions an authenticated checkpoint store in a separate SQLite
 file, outside the file database's restore boundary. It advances the
@@ -282,7 +440,7 @@ interrupted revocation can leave the checkpoint ahead of the file store.
 In that case the workers withhold protected operations pending trusted
 recovery.
 
-## Archive-enabled worker integration
+### Archive-enabled worker integration
 
 The two HTTP workers support an opt-in archive mode. In that mode, protected
 reads and fresh evidence require verified current rows and a durable archive
@@ -351,7 +509,7 @@ PYTHONPATH=. python scripts/smoke_archive_ops.py
 python scripts/smoke_console.py
 ```
 
-## Sprint demo commands
+### Sprint demo commands
 
 Run from a clean checkout with the pinned requirements installed. The normal
 entry points continue to use the reviewed baseline controls.
@@ -391,7 +549,7 @@ files. Archive receipts authenticate record provenance within this fixture.
 Portable ML-DSA signatures for archive receipts and producer renewal remain out of scope. Separate baseline worker Evidence Passports are supported.
 
 
-## Release verification
+### Release verification
 
 After setup, run these checks from the repository root. Set `toolkit_dir`
 to the path of the pinned toolkit checkout if it is stored elsewhere.
@@ -437,3 +595,5 @@ An asset's authenticated ciphertext binds its identifier and version, but
 does not establish that it is the newest genuine ciphertext. The revocation
 witness anchors a prior audit checkpoint. Independent current-state comparison
 belongs to the experimental archive workflow.
+
+</details>
