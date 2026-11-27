@@ -150,3 +150,44 @@ Keep the working state directory, keys, revocation witness and archive.
 This procedure recovers the complete encrypted working store. Baseline
 continues to trust direct database writers. Archive mode provides the
 independent current-state and rollback checks.
+
+## Worker assurance validation
+
+The seeded authorization oracle starts from fixture policy without reading
+worker state or importing its authorization rules. Two fixed seeds vary
+operation order and worker selection. Each bounded sequence includes reads,
+missing grants, approval mismatch and reuse, successful rotations, and
+revocation. This is a regression model for these fixtures. It does not
+exhaust the worker state space or model arbitrary concurrent schedules.
+
+The restore regressions launch a child process that runs the actual
+verified-restoration implementation. An instrumented checkpoint pauses it
+before and after missing-store publication, or in a SQLite backup progress
+callback with pages still to copy. The parent sends SIGKILL and checks a
+subsequent worker startup and read. Before publication or SQLite copy commit,
+the worker fails closed. After publication, the worker serves the eligible
+snapshot. Retrying verified restore recovers the interrupted in-place copy
+case. These tests model process termination on one host. They do not test
+power loss or storage-controller failures.
+
+The recovery design gate kept exact checkpoint eligibility. A protected
+read can leave asset and authorization projections unchanged while advancing
+the audit head, archive receipts and working marker. An older snapshot then
+lacks the authenticated local records required by the retained archive.
+Applying it would require either an independently justified replay of that
+suffix or weaker evidence checks. Neither is part of this candidate. Export
+a current verified snapshot after the desired observation boundary.
+
+Run the bounded same-host worker latency benchmark with
+`PYTHONPATH=. python scripts/benchmark_worker.py`. It reports loopback
+health-route round trips, local read-only state verification and complete
+HTTP protected reads. The health route includes HTTP parsing and handler
+overhead. The measurements are separate controls and cannot be subtracted
+to isolate a component. The operation is a serial bearer-authorized read
+with a small synthetic asset, without a public-key challenge. Worker reads
+advance history during each sample window. These are latency measurements,
+not concurrent throughput or capacity guarantees.
+
+Both workers share one host. Baseline mode trusts direct database writers.
+Experimental archive recovery requires the retained keys, witness and
+independent evidence store.

@@ -60,3 +60,12 @@ backup rejection and Evidence Passport negative verification.
 Archive verification is bounded to the configured record capacity. See
 the review evidence benchmark for measured costs up to 920 records.
 Baseline retains its documented direct-database-writer trust assumption.
+
+### Follow-up assurance validation
+
+The fixture-derived two-worker oracle now runs bounded seeded transitions.
+Recovery fault tests use real process termination during restoration.
+An independent synthetic detector cohort freezes class and timing labels
+before analysis and covers benign correlation and clock-boundary controls.
+End-to-end HTTP worker latency is measured separately from the local
+archive-verification benchmark.

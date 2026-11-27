@@ -3,6 +3,7 @@ from itertools import product
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 import json
+import random
 from pathlib import Path
 import secrets
 import signal
@@ -447,3 +448,196 @@ class ArchiveWorkerTest(unittest.TestCase):
                 status, body = self.read(port, version)
                 self.assertEqual((status, body["reason"]), (403, "revoked_device"))
                 self.assertNotIn("body", body)
+
+    def test_seeded_worker_transitions_match_fixture_policy(self):
+        for seed in (1729, 9043):
+            with self.subTest(seed=seed), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                state = Path(directory)
+                keys = [secrets.token_bytes(32) for _ in range(3)]
+                for label, key in zip(("audit", "storage", "backup"), keys):
+                    (state / f"{label}.key").write_bytes(key)
+                witness_file = state / "witness" / "checkpoint.sqlite"
+                witness_file.parent.mkdir()
+                witness = RevocationWitness(witness_file, keys[0])
+                witness.provision()
+                guard = Guard(state / "demo.sqlite", *keys, witness=witness)
+                actors = {name: guard.enroll(name, "admin" if name == "admin" else "reader")
+                          for name in ("admin", "reader", "peer")}
+                body = b"independent model fixture"
+                guard.seed_file("brief", body, "reader", "peer")
+                approvals = {version: guard.approve_rotation("admin", "brief", version, time.time() + 120)
+                             for version in range(1, 4)}
+                provision_archive(state, guard)
+                ports = [start(stack, state, node, state / f"{node}.log", archive=True)[0]
+                         for node in ("A", "B")]
+                rng = random.Random(seed)
+                version, consumed, revoked = 1, set(), set()
+                chunks = [
+                    [("rotate", "reader", 1), ("rotate", "admin", 2), ("read", "peer", 1)],
+                    [("rotate", "admin", 1)],
+                    [("read", "reader", 1), ("read", "peer", 2), ("rotate", "admin", 1)],
+                    [("revoke", "admin", "reader")],
+                    [("read", "reader", 2), ("read", "peer", 2), ("revoke", "peer", "peer")],
+                    [("rotate", "admin", 2)],
+                    [("read", "admin", 3), ("read", "peer", 3), ("read", "reader", 3)],
+                ]
+                operations = []
+                for items in chunks:
+                    items += [("read", rng.choice(tuple(actors)), rng.randint(1, 4)) for _ in range(5)]
+                    rng.shuffle(items)
+                    operations.extend(items)
+                for index, (operation, actor, parameter) in enumerate(operations):
+                    fields = {"target": "brief"}
+                    if operation == "read":
+                        fields["version"] = parameter
+                        reason = ("revoked_device" if actor in revoked else
+                                  "missing_grant" if actor == "admin" else
+                                  "wrong_version" if parameter != version else "read")
+                    elif operation == "rotate":
+                        fields.update(version=1 if parameter == 2 and version == 1 else parameter,
+                                      approval=approvals[parameter])
+                        if actor != "admin":
+                            reason = "action_forbidden"
+                        elif parameter in consumed:
+                            reason = "approval_missing"
+                        elif fields["version"] != parameter:
+                            reason = "approval_version_mismatch"
+                        else:
+                            self.assertEqual(version, parameter)
+                            reason, version = "version_rotated", version + 1
+                            consumed.add(parameter)
+                    else:
+                        fields["target"] = Guard.digest(actors[parameter])
+                        reason = "revoked" if actor == "admin" else "action_forbidden"
+                        if reason == "revoked":
+                            revoked.add(parameter)
+                    status, result, _ = call(ports[rng.randrange(2)], operation, actors[actor], fields,
+                                             idempotency_key=f"seed-{seed}-{index}")
+                    with self.subTest(seed=seed, index=index, operation=operation):
+                        self.assertEqual((status, result.get("reason")),
+                                         (200 if reason in {"read", "version_rotated", "revoked"} else 403, reason))
+                        if reason == "read":
+                            self.assertEqual(base64.b64decode(result["body"]), body)
+                        else:
+                            self.assertNotIn("body", result)
+                self.assertEqual((version, consumed, revoked), (3, {1, 2}, {"reader"}))
+
+    def test_real_sigkill_during_missing_store_restore(self):
+        coordinator = ArchivedGuard(self.guard, self.state)
+        backup = self.state / "restore-input.sqlite"
+        coordinator.export_verified(backup)
+        self.working_path.unlink()
+        child_script = """
+import os
+from pathlib import Path
+import signal
+import sys
+from archive_ops import existing_guard
+from kig_core.worker_archive import ArchivedGuard
+state, snapshot = map(Path, sys.argv[1:3])
+link = os.link
+
+def pause_link(source, destination):
+    if sys.argv[3] == "after-publication":
+        link(source, destination)
+    print("RESTORE CHECKPOINT", flush=True)
+    signal.pause()
+
+os.link = pause_link
+ArchivedGuard(existing_guard(state), state).restore_verified(snapshot)
+"""
+        for boundary in ("before-publication", "after-publication"):
+            with self.subTest(boundary=boundary):
+                child_log = self.state / f"{boundary}.log"
+                with child_log.open("w") as log, subprocess.Popen(
+                    [sys.executable, "-c", child_script, str(self.state), str(backup), boundary],
+                    stdout=log, stderr=subprocess.STDOUT,
+                ) as child:
+                    try:
+                        wait_for(lambda: "RESTORE CHECKPOINT" in child_log.read_text() or child.poll() is not None,
+                                 "restoration publication boundary")
+                        self.assertIsNone(child.poll(), child_log.read_text())
+                    finally:
+                        if child.poll() is None:
+                            child.kill()
+                        child.wait(timeout=5)
+                    self.assertEqual(child.returncode, -signal.SIGKILL)
+                with ExitStack() as stack:
+                    port, _ = start(stack, self.state, "A", self.state / f"{boundary}-worker.log", archive=True)
+                    status, result = self.read(port, 1)
+                    if boundary == "before-publication":
+                        self.assertEqual(status, 503)
+                        self.assertNotIn("body", result)
+                    else:
+                        self.assertEqual(status, 200)
+                        self.assertEqual(base64.b64decode(result["body"]), b"synthetic rotation input")
+
+    def test_read_receipt_keeps_older_snapshot_ineligible(self):
+        coordinator = ArchivedGuard(self.guard, self.state)
+        snapshot = self.state / "before-read.sqlite"
+        coordinator.export_verified(snapshot)
+        with ExitStack() as stack:
+            port, _ = start(stack, self.state, "A", self.state / "read-eligibility.log", archive=True)
+            self.assertEqual(self.read(port, 1)[0], 200)
+        with self.assertRaises(ArchiveUnavailable):
+            coordinator.restore_verified(snapshot)
+        self.assertEqual(self.active_state(), (1, set(self.approvals)))
+
+    def test_real_sigkill_inside_sqlite_restore_copy(self):
+        coordinator = ArchivedGuard(self.guard, self.state)
+        backup = self.state / "copy-input.sqlite"
+        coordinator.export_verified(backup)
+        with closing(sqlite3.connect(self.working_path)) as db, db:
+            db.execute("UPDATE files SET body=? WHERE id='brief'", (b"damaged fixture",))
+        child_script = """
+from pathlib import Path
+import signal
+import sqlite3
+import sys
+from archive_ops import existing_guard
+from kig_core.worker_archive import ArchivedGuard
+state, snapshot = map(Path, sys.argv[1:3])
+connect = sqlite3.connect
+
+class PausedBackup(sqlite3.Connection):
+    def backup(self, target, *, pages, progress, sleep):
+        def checkpoint(status, remaining, total):
+            progress(status, remaining, total)
+            if remaining > 0:
+                print("RESTORE COPY IN PROGRESS", flush=True)
+                signal.pause()
+        return super().backup(target, pages=1, progress=checkpoint, sleep=sleep)
+
+def connect_with_pause(path, *args, **kwargs):
+    if str(path) == snapshot.as_uri() + "?mode=ro":
+        kwargs["factory"] = PausedBackup
+    return connect(path, *args, **kwargs)
+
+sqlite3.connect = connect_with_pause
+ArchivedGuard(existing_guard(state), state).restore_verified(snapshot)
+"""
+        child_log = self.state / "restore-copy.log"
+        with child_log.open("w") as log, subprocess.Popen(
+            [sys.executable, "-c", child_script, str(self.state), str(backup)],
+            stdout=log, stderr=subprocess.STDOUT,
+        ) as child:
+            try:
+                wait_for(lambda: "RESTORE COPY IN PROGRESS" in child_log.read_text() or child.poll() is not None,
+                         "SQLite restore page copy")
+                self.assertIsNone(child.poll(), child_log.read_text())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+            self.assertEqual(child.returncode, -signal.SIGKILL)
+        with ExitStack() as stack:
+            port, _ = start(stack, self.state, "B", self.state / "copy-worker-failed.log", archive=True)
+            status, result = self.read(port, 1)
+            self.assertEqual(status, 503)
+            self.assertNotIn("body", result)
+        coordinator.restore_verified(backup)
+        with ExitStack() as stack:
+            port, _ = start(stack, self.state, "B", self.state / "copy-worker-retried.log", archive=True)
+            status, result = self.read(port, 1)
+            self.assertEqual(status, 200)
+            self.assertEqual(base64.b64decode(result["body"]), b"synthetic rotation input")
