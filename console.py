@@ -7,7 +7,7 @@ import sys
 from urllib.parse import urlsplit
 
 from demo_cli import ScenarioAssertion, run
-from console_scenarios import LAB_SCENARIOS, assurance_lab, detector_replay, time_machine
+from console_scenarios import LAB_SCENARIOS, assurance_lab, detector_replay, operational_monitor, time_machine
 
 
 ORIGIN = "http://127.0.0.1:8080"
@@ -51,15 +51,19 @@ class Console(BaseHTTPRequestHandler):
         lab = self.path.removeprefix("/run/lab/")
         if lab in LAB_SCENARIOS:
             routes[f"/run/lab/{lab}"] = lambda: assurance_lab(lab, challenge)
+        monitor = self.path == "/run/monitor"
         scenario = routes.get(self.path)
         if (
             self.headers.get("Host") != urlsplit(ORIGIN).netloc
             or self.headers.get("Origin") != ORIGIN
             or self.headers.get("X-Recovery-Console") != "run"
             or self.headers.get("Content-Length") not in (None, "0")
-            or scenario is None
+            or (scenario is None and not monitor)
         ):
             self.respond(403, b'{"error":"forbidden"}')
+            return
+        if monitor:
+            self.stream_monitor()
             return
         try:
             result = scenario()
@@ -71,6 +75,28 @@ class Console(BaseHTTPRequestHandler):
             self.respond(503, b'{"error":"Scenario unavailable. Check the console process log."}')
             return
         self.respond(200, json.dumps(result).encode())
+
+    def stream_monitor(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+
+        def publish(item):
+            self.wfile.write((json.dumps(item, allow_nan=False) + "\n").encode())
+            self.wfile.flush()
+
+        try:
+            report = operational_monitor(publish)
+            status = "UNAVAILABLE" if any(item["status_events"] for item in report.values()) else "PASS"
+            publish({"type": "complete", "status": status, "report": report})
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except ScenarioAssertion as error:
+            publish({"type": "complete", "status": "FAIL", "error": str(error)})
+        except (RuntimeError, OSError, ValueError):
+            publish({"type": "complete", "status": "UNAVAILABLE", "error": "Monitor could not finish."})
 
 
 def main():

@@ -11,6 +11,7 @@ import time
 from demo_cli import call, require, run, start
 from detection_cli import synthetic
 from kig_core.detector_archive import evidence_archive, replay
+from kig_core.audit_observer import AuditObserver
 from kig_core.guard import Guard
 from kig_core.witness import RevocationWitness
 from kig_core.worker_archive import ArchivedGuard, provision_archive
@@ -106,7 +107,7 @@ def time_machine():
 
 
 
-def approval_lab(competing):
+def approval_lab(competing, publish_audit=None):
     with tempfile.TemporaryDirectory(prefix="track4-approval-") as directory, ExitStack() as stack:
         state = Path(directory)
         keys = [secrets.token_bytes(32) for _ in range(3)]
@@ -118,6 +119,7 @@ def approval_lab(competing):
         witness.provision()
         guard = Guard(state / "demo.sqlite", *keys, witness=witness)
         admin, reader = guard.enroll("operator", "admin"), guard.enroll("teammate")
+        observer = AuditObserver(guard, admin, publish_audit) if publish_audit else None
         guard.seed_file("brief", b"synthetic approval lab", "teammate")
         ports = {node: start(stack, state, node, state / f"{node}.log")[0] for node in ("A", "B")}
         approval = guard.approve_rotation("operator", "brief", 1, time.time() + 120)
@@ -126,7 +128,8 @@ def approval_lab(competing):
             status, response, _ = call(ports[node], action, token, fields)
             require(status == 200 or "body" not in response, "denial disclosed protected content")
             return dict(node=node, status=status, reason=response.get("reason"),
-                        request_id=response.get("request_id"))
+                        request_id=response.get("request_id"),
+                        body_withheld={"body", "ciphertext", "proof", "token"}.isdisjoint(response))
 
         def read(node, version):
             result = observe(node, "read", reader, {"target": "brief", "version": version})
@@ -147,7 +150,10 @@ def approval_lab(competing):
                     {(200, "version_rotated"), (403, "wrong_version")}, "competing rotations did not serialize")
         else:
             expired = guard.approve_rotation("operator", "brief", 1, time.time() - 1)
-            outcomes = [rotate("A", expired), rotate("A", approval), rotate("B", approval)]
+            expired_result = rotate("A", expired)
+            if observer:
+                observer.poll("After expired approval, before valid rotation", [expired_result])
+            outcomes = [expired_result, rotate("A", approval), rotate("B", approval)]
             require([(item["status"], item["reason"]) for item in outcomes] ==
                     [(403, "approval_expired"), (200, "version_rotated"), (403, "approval_missing")],
                     "approval expiry or single-use invariant failed")
@@ -163,7 +169,12 @@ def approval_lab(competing):
                     and event["reason"] == outcome["reason"]
                     and event["allowed"] == (outcome["status"] == 200), "rotation audit mismatch")
             evidence.append(event)
-        return dict(before=before, after=after, outcomes=outcomes, evidence=evidence)
+        if observer:
+            observer.current_versions["brief"] = 2
+            observer.poll("After approval and retired-version checks",
+                          [item for item in outcomes + after if item["status"] == 403])
+        return dict(before=before, after=after, outcomes=outcomes, evidence=evidence,
+                    monitor=observer.result() if observer else None)
 
 
 LAB_SCENARIOS = ("revocation", "approval", "competing", "pre", "post", "backup", "quarantine", "passport")
@@ -194,4 +205,25 @@ def assurance_lab(name, challenge=None):
         else:
             observations = {key: result[key] for key in ("before", "active_version", "nodes",
                                                          "recovery_ms", "cutoff", "timeline")}
-    return {"scenario": name, "status": "PASS", "observations": observations}
+    response = {"scenario": name, "status": "PASS", "observations": observations}
+    if name == "passport":
+        response["claims"] = result["claim_results"]
+    return response
+
+
+def operational_monitor(publish):
+    reports = {}
+    for fixture, execute in (
+        ("recovery", lambda send: run("post", publish_audit=send)),
+        ("approval", lambda send: approval_lab(False, publish_audit=send)),
+    ):
+        publish({"type": "fixture_started", "fixture": fixture})
+        result = execute(lambda event: publish({**event, "fixture": fixture}))
+        report = result["monitor"]
+        reports[fixture] = report
+        if report["status_events"]:
+            continue
+        require(report["findings"], "monitor received no authenticated denials")
+        require(all(item["containment"] == "CONFIRMED_DENIAL_NO_BODY"
+                    for item in report["findings"]), "monitor could not correlate a contained denial")
+    return reports

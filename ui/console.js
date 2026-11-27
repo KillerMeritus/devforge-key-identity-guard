@@ -6,6 +6,7 @@ const state = (id, value) => {
 };
 const measured = (id, condition) => state(id, condition ? 'PASS' : 'FAIL');
 const allNodes = ['A', 'B'];
+const runControls = () => ['run', 'run-detection', 'run-archive', 'run-lab', 'run-monitor'].map(byId);
 let active = false;
 
 function showEvidence(summary, evidence) {
@@ -31,7 +32,7 @@ function row(parent, source, title, action) {
 async function runScenario(route, statusId, checks, render, challenge) {
   if (active) return;
   active = true;
-  const controls = ['run', 'run-detection', 'run-archive', 'run-lab'].map(byId);
+  const controls = runControls();
   controls.forEach(button => { button.disabled = true; });
   checks.forEach(check => state(check, 'PENDING'));
   text(statusId, 'Running the local scenario…');
@@ -193,14 +194,14 @@ function updateLabSpec() {
 byId('lab-choice').addEventListener('change', updateLabSpec);
 updateLabSpec();
 
-function labRecord(title, record) {
+function labRecord(title, record, container = 'lab-outcome') {
   const details = document.createElement('details');
   const summary = document.createElement('summary');
   summary.textContent = title;
   const data = document.createElement('pre');
   data.textContent = JSON.stringify(record, null, 2);
   details.append(summary, data);
-  byId('lab-outcome').append(details);
+  byId(container).append(details);
 }
 
 byId('run-lab').addEventListener('click', async () => {
@@ -221,7 +222,8 @@ byId('run-lab').addEventListener('click', async () => {
           labRecord('Node ' + node + ' original signed statement', statement);
           labRecord('Node ' + node + ' controlled modified copy', modified_statement);
         }
-        text('lab-status', result.status + ' · Historical statement authentication and modified-copy rejection');
+        labRecord('Independent policy appraisal across both workers', result.claims);
+        text('lab-status', result.status + ' · Historical claims and modified-copy rejection');
       } else if (data.before) {
         labRecord('Before · observed starting state', data.before);
         labRecord('After · observed worker state', data.after || data.nodes);
@@ -243,5 +245,50 @@ byId('run-lab').addEventListener('click', async () => {
     }, challenge);
   } finally {
     choice.disabled = false;
+  }
+});
+
+byId('run-monitor').addEventListener('click', async () => {
+  if (active) return;
+  active = true;
+  const controls = runControls();
+  controls.forEach(button => { button.disabled = true; });
+  byId('monitor-events').replaceChildren();
+  text('monitor-status', 'Waiting for authenticated audit observations…');
+  try {
+    const response = await fetch('/run/monitor', {method: 'POST', headers: {'X-Recovery-Console': 'run'}});
+    if (!response.ok) throw new Error('Cannot start the monitor.');
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+    let completed = false;
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffer += value;
+      let boundary;
+      while ((boundary = buffer.indexOf('\n')) !== -1) {
+        const record = JSON.parse(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 1);
+        if (record.type === 'complete') {
+          completed = true;
+          text('monitor-status', record.status + (record.error ? ' · ' + record.error : ' · Monitored fixtures complete'));
+          if (record.report) labRecord('Final findings, containment and poll measurements', record.report, 'monitor-events');
+        } else if (record.type === 'fixture_started') {
+          text('monitor-status', 'Observing the ' + record.fixture + ' fixture…');
+        } else {
+          const title = record.type === 'finding' ? record.node + ' · ' + record.reason :
+            record.type === 'containment' ? record.node + ' · Denial and withheld body confirmed' :
+            record.type === 'administrative_response' ? 'Scripted operator response · ' + record.action :
+            record.rule.replaceAll('_', ' ');
+          labRecord(record.fixture + ' · ' + title, record, 'monitor-events');
+        }
+      }
+    }
+    if (!completed) throw new Error('The monitor ended before reporting completion.');
+  } catch (error) {
+    text('monitor-status', 'UNAVAILABLE · ' + error.message);
+  } finally {
+    controls.forEach(button => { button.disabled = false; });
+    active = false;
   }
 });

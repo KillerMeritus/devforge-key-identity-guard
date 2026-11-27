@@ -8,7 +8,7 @@
   <header class="masthead">
     <div class="brand"><span class="brand-mark"></span> DEVFORGE / TRACK 4</div>
     <nav aria-label="Console sections">
-      <a href="#scenario-lab">Scenarios</a><a href="#recovery">Recovery</a><a href="#evidence-panel">Evidence</a><a href="#intelligence">Detection</a><a href="#archive-lab">Archive</a>
+      <a href="#scenario-lab">Scenarios</a><a href="#recovery">Recovery</a><a href="#evidence-panel">Evidence</a><a href="#operational-monitor">Monitor</a><a href="#intelligence">Detection</a><a href="#archive-lab">Archive</a>
     </nav>
   </header>
 
@@ -86,6 +86,14 @@
       <div><dt>Archive snapshot quarantine</dt><dd id="check-archive" data-state="pending">PENDING</dd></div>
       <div><dt>Detector receipt binding</dt><dd id="check-detector" data-state="pending">PENDING</dd></div>
     </dl>
+  </section>
+
+  <section class="panel" id="operational-monitor">
+    <div class="section-title"><h2>Operational audit monitor</h2><span class="label stable">BASELINE</span></div>
+    <p>Observe authenticated audit records as the local recovery and approval fixtures run.</p>
+    <button class="secondary" id="run-monitor">Run monitored fixtures</button>
+    <p class="status" id="monitor-status" role="status">NOT TESTED</p>
+    <div id="monitor-events"></div>
   </section>
 
   <div class="layout lower">

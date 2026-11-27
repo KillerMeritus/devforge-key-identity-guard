@@ -31,7 +31,7 @@ kig_core/detector.py evaluates finite synthetic replay. Actor, session and corre
 
 Finite replay excludes conflicting source IDs and deduplicates identical observations. Archived replay rejects conflicting input before claiming verified findings. Incremental ingest assumes identities have been checked upstream. There is no demonstrated live reconciliation or production accuracy estimate. Held-out results score anchor/rule pairs, not confidence calibration.
 
-console.py serves the loopback console. A judge can enter a challenge and click a measured baseline invariant to inspect both node results or the verified audit. The passport is worker-signed. HTTP status, elapsed time and snapshot orchestration are harness observations. The trust-boundary panel identifies which component supplies each result. No live worker-audit monitor is included.
+console.py serves the loopback console. A judge can enter a challenge and click a measured baseline invariant to inspect both node results or the verified audit. The passport is worker-signed. HTTP status, elapsed time and snapshot orchestration are harness observations. The trust-boundary panel identifies which component supplies each result.
 
 ## Questions judges may ask
 
@@ -64,5 +64,52 @@ Authentication applies to historical statements. The measured security
 invariants also depend on harness assertions and observations.
 
 The Evidence Explorer includes authenticated worker audit history from a
-completed recovery run. There is no continuous worker-audit monitor. The
+completed recovery run. A separate monitor observes only the controlled recovery and approval runs. The
 archive quarantine and historical receipt workflow remains experimental.
+
+## Historical claims and live audit
+
+The passport exercise now evaluates three fixed historical claims on both
+workers: revoked-device denial, authorized teammate read, and retired-version
+denial. Its policy expectations come from fixture setup and observed HTTP
+request IDs, with challenges chosen before signing and node public keys
+provisioned before worker startup. The signed event binds the credential or
+actor, target asset, read action, authorization decision, reason and requested
+version. The retired-version claim uses the independently expected retired
+version. These claims concern the signed requests, not the current database,
+the age of its state, or whether a process actually terminated.
+
+For an offline check, provision `A.pub`, `B.pub` and the expectations through
+your trusted channel. The JSON has `actor` and/or `credential_ref`, `asset`,
+`version`, and `nodes.A` and `nodes.B` with `challenge` and `request_id`.
+The existing demo export writes the three `*.expected.json` files into
+`--trust-dir` alongside its separately provisioned public keys. A real verifier
+must establish those values independently of the signed envelopes.
+
+```sh
+python security_claims.py --expected judge-pins/revoked-device.expected.json \
+  --key-a judge-pins/A.pub --key-b judge-pins/B.pub revoked-device \
+  statements/A.json statements/B.json
+```
+
+Exit codes 0, 1 and 2 mean VERIFIED, FAILED and INSUFFICIENT EVIDENCE.
+The selector also shows the existing individual signature authentication result.
+
+The Operational Audit Monitor reads authenticated audit snapshots with the
+existing operator authorization while disposable recovery and approval runs
+are in progress. It streams findings, matching HTTP denial-without-body
+containment evidence, and the separately scripted operator revocation.
+Related denials are linked only within the same fixture, credential and
+asset, within five seconds by audit time. Links are for investigation. The
+observer performs no administrative actions. Audit unavailability and
+integrity failures are surfaced without creating worker event identities.
+Organizer synthetic detector replay remains separate.
+
+Each fixture is limited to 40 polls, 256 audit records, and a 250 ms
+database deadline per poll. Scheduled scenario checkpoints trigger reads,
+with 25 ms retry spacing if a watched denial is missing. Poll gap includes
+scenario work between checkpoints. Verification time includes authorization,
+witness checks and authenticated audit reads. Audit-to-observation time uses
+same-host wall-clock timestamps and includes scenario scheduling. The
+observation-to-alert measurement uses a monotonic clock and measures local
+classification through creation of the finding, before browser delivery.

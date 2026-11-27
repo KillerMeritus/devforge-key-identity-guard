@@ -169,6 +169,27 @@ def main():
                     })""")
                 assert invalid_route.value.status == 403
                 print("PASS all eight lab scenarios, repeat isolation, invalid input, and error presentation")
+                with page.expect_response("**/run/monitor", timeout=20000) as monitor:
+                    page.get_by_role("button", name="Run monitored fixtures").click()
+                expect(page.locator("#monitor-status")).to_contain_text("PASS", timeout=20000)
+                records = [json.loads(line) for line in monitor.value.text().splitlines()]
+                assert records[-1]["type"] == "complete"
+                findings = [item for item in records if item["type"] == "finding"]
+                assert any("before worker termination" in item["stage"] for item in findings)
+                assert any("before valid rotation" in item["stage"] for item in findings)
+                assert {item["rule"] for item in findings} >= {
+                    "revoked_device_read", "invalid_rotation_approval", "retired_version_read", "authorization_failure"
+                }
+                containment = [item for item in records if item["type"] == "containment"]
+                assert len(containment) == len(findings)
+                assert len({(item["fixture"], item["request_id"]) for item in findings}) == len(findings)
+                assert next(i for i, item in enumerate(records) if item["type"] == "administrative_response") < next(
+                    i for i, item in enumerate(records) if item["type"] == "finding")
+                page.locator("#operational-monitor").scroll_into_view_if_needed()
+                capture("operational-monitor")
+                if args.screenshots:
+                    (args.screenshots.parent / "operational-monitor.ndjson").write_text(monitor.value.text())
+                print("PASS live authenticated monitor, containment correlation, and bounded timing samples")
                 assert not errors, errors
                 browser.close()
         finally:

@@ -312,11 +312,15 @@ class Guard:
                 raise ValueError("Audit head mismatch")
         return events
 
-    def evidence(self, token):
+    def evidence(self, token, *, max_events=None):
         with self.transaction(write=False) as db:
             identity = self.identity(db, token)
             if identity is None:
                 raise PermissionError("unauthenticated")
             if identity[1:] != ("admin", 0):
                 raise PermissionError("forbidden")
+            if max_events is not None and db.execute(
+                "SELECT id FROM audit ORDER BY id LIMIT 1 OFFSET ?", (max_events,)
+            ).fetchone() is not None:
+                raise ValueError("Audit observation record budget exceeded")
             return self.audit(db)

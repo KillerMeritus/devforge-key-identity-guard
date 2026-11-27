@@ -21,7 +21,9 @@ from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
 
 from evidence_passport import verify as verify_passport
+from kig_core.audit_observer import AuditObserver
 from kig_core.guard import Guard
+from security_claims import appraise
 from kig_core.witness import RevocationWitness
 
 
@@ -95,7 +97,7 @@ def start(stack, state, node, log, port=None, checkpoint=None, *, archive=False)
     return port, process
 
 
-def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_modified=False):
+def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_modified=False, publish_audit=None):
     timeline = []
 
     def event(source, label, **fields):
@@ -130,6 +132,8 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
         guard.seed_file("brief", BODY, "owner", "teammate")
         guard.seed_file("notes", b"separate synthetic asset", "teammate")
         approval = guard.approve_rotation("operator", "brief", 1, time.time() + 120)
+        observer = AuditObserver(guard, operator, publish_audit) if publish_audit else None
+        denied_responses = []
         log = state / "node-a.log"
         a, victim = start(stack, state, "A", log, checkpoint=phase)
         b, _ = start(stack, state, "B", state / "node-b.log")
@@ -137,6 +141,12 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
 
         def execute(port, route, token, **fields):
             status, result, _ = call(port, route, token, fields)
+            if observer and status in (401, 403) and result.get("request_id"):
+                denied_responses.append(dict(
+                    request_id=result["request_id"], node="A" if port == a else "B",
+                    status=status, reason=result["reason"],
+                    body_withheld={"body", "ciphertext", "proof", "token"}.isdisjoint(result),
+                ))
             return status, result
 
         def read(port, token, version):
@@ -166,6 +176,10 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
                 "reader rotation accepted")
         status, result = execute(a, "revoke", operator, target=target)
         require(status == 200, "revocation failed")
+        if observer:
+            publish_audit({"type": "administrative_response", "action": "revoke", "node": "A",
+                           "actor": "operator", "request_id": result["request_id"],
+                           "status": status, "initiator": "Scripted operator action"})
         observed = result["commit_observed_ns"]
         event("A", "Device revoked", request_id=result["request_id"])
 
@@ -188,6 +202,8 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
         denied, mismatch = execute(b, "rotate", operator, target="notes", version=1, approval=approval)
         require(denied == 403 and mismatch["reason"] == "approval_target_mismatch", "approval mismatch missed")
         event("B", "Approval target mismatch", request_id=mismatch["request_id"])
+        if observer:
+            observer.poll("Before rotation begins", denied_responses)
         reconnect = pool.submit(execute, a, "rotate", operator, target="brief", version=1, approval=approval)
         wait_for(lambda: "CHECKPOINT prepared" in log.read_text().splitlines(), "prepared ciphertext")
 
@@ -224,7 +240,11 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
             for node, result in cutoff.items():
                 event(node, "Old key version rejected", version=1, **result)
             continuity_results["committed"] = continuity(2, "Teammate reads after commit before rotation reply")
+            if observer:
+                observer.current_versions["brief"] = 2
             require(not reconnect.done(), "rotation replied before the post-commit probe")
+        if observer:
+            observer.poll(f"At {phase}-commit checkpoint, before worker termination", denied_responses)
         event("Harness", f"Reached {phase}-commit checkpoint")
         victim.kill()
         require(victim.wait(timeout=5) == -signal.SIGKILL, "expected SIGKILL termination")
@@ -239,6 +259,7 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
         a, _ = start(stack, state, "A", state / "node-a-restarted.log", port=a)
         expected = 1 if phase == "pre" else 2
         observed_nodes = {}
+        policy_expectations, policy_statements = {}, {}
         for name, port in (("A", a), ("B", b)):
             result = checked_read(port, teammate, expected)
             if name == "A":
@@ -268,6 +289,11 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
                     "reader obtained a signed audit record")
             passports = {}
             for label, (request_id, allowed, reason, version) in decisions.items():
+                actor = "owner" if label == "revoked-device" else "teammate"
+                expectation = policy_expectations.setdefault(
+                    label, {"actor": actor, "asset": "brief", "version": version, "nodes": {}}
+                )
+                expectation["nodes"][name] = {"request_id": request_id, "challenge": challenge}
                 route = f"evidence/{request_id}/attestation"
                 status, signed, _ = call(port, route, operator, {"challenge": challenge})
                 require(status == 200 and verify_passport(
@@ -277,6 +303,7 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
                 require((statement["allowed"], statement["reason"], statement["version"]) ==
                         (allowed, reason, version), "worker statement did not match the observed decision")
                 passports[label] = signed
+                policy_statements.setdefault(label, []).append(signed)
                 if passport_dir is not None:
                     filename = f"{name}.json" if label == "revoked-device" else f"{name}-{label}.json"
                     (passport_dir / filename).write_text(json.dumps(signed))
@@ -308,6 +335,16 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
                     "modified_statement": modified,
                 }
             event(name, "ML-DSA-65 revocation evidence authenticated", request_id=revoked_request_id)
+        claim_results = {}
+        if verify_modified or passport_dir is not None:
+            for label, expected_claim in policy_expectations.items():
+                claim_results[label] = appraise(label, policy_statements[label],
+                                                expected_claim, trusted_public_keys)
+                require(claim_results[label] == "VERIFIED", "historical policy appraisal failed")
+                if trust_dir is not None:
+                    (trust_dir / f"{label}.expected.json").write_text(json.dumps(expected_claim))
+        if observer:
+            observer.poll("After restart, before backup verification", denied_responses)
         evidence = guard.evidence(operator)
         commits = [row for row in evidence if row["reason"] == "version_rotated"]
         require(len(commits) == (phase == "post"), "unexpected number of committed rotation events")
@@ -336,6 +373,7 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
                             "damaged_accepted": damaged_accepted},
                     evidence=guard.evidence(operator), proof_verified=True, audit_verified=True,
                     continuity=continuity_results, nodes=observed_nodes, cutoff=cutoff,
+                    claim_results=claim_results, monitor=observer.result() if observer else None,
                     revocation_ms={node: round(delay, 2) for node, delay in timings.items()})
 
 

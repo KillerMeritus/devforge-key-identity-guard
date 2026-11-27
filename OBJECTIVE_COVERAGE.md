@@ -38,3 +38,10 @@ quarantine uses the experimental archive. The Chromium smoke test executes
 all eight choices, repeats the approval fixture with fresh request identities,
 and checks actual modified-copy rejection. Its simulated HTTP error responses
 exercise interface presentation. The detector remains a separate synthetic replay.
+
+Historical policy appraisal requires independent identity, asset, version,
+request, challenge and key expectations. It evaluates all three supported
+claims with both workers' signed statements. Live monitoring observes actual
+authenticated baseline audit records during the controlled fixtures, separately
+from synthetic detector inputs. Containment is confirmed only when the
+matching HTTP denial withheld protected content.
