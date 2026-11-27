@@ -21,10 +21,30 @@ class AuditObserver:
         self.previous_poll = None
         self.current_versions = {}
 
+    def report_budget_gap(self, stage, missing, *, poll_attempted):
+        missing_ids = sorted(missing)
+        key = ("poll_budget_exhausted", stage, tuple(missing_ids), poll_attempted)
+        if key in self.problems:
+            return
+        notice = {
+            "rule": "poll_budget_exhausted", "rule_version": 1, "stage": stage,
+            "poll_attempted": poll_attempted, "missing_request_ids": missing_ids,
+            "explanation": (
+                "The poll budget ended before all required observations were authenticated."
+                if poll_attempted else "The poll budget was already exhausted. This checkpoint was skipped."
+            ),
+        }
+        self.problems[key] = notice
+        self.publish({"type": "monitor_status", **notice})
+
     def poll(self, stage, responses=()):
         """Poll inside a running scenario and correlate request-specific HTTP observations."""
         responses = {item["request_id"]: item for item in responses}
-        for _ in range(MAX_POLLS - len(self.samples)):
+        remaining = MAX_POLLS - len(self.samples)
+        if remaining <= 0:
+            self.report_budget_gap(stage, responses.keys() - self.findings.keys(), poll_attempted=False)
+            return
+        for _ in range(remaining):
             started = time.monotonic()
             interval = None if self.previous_poll is None else (started - self.previous_poll) * 1000
             self.previous_poll = started
@@ -64,8 +84,14 @@ class AuditObserver:
                             and finding["containment"] == "UNCONFIRMED"):
                         finding["containment"] = "CONFIRMED_DENIAL_NO_BODY"
                         self.publish({"type": "containment", **finding})
-            if events is None or responses.keys() <= self.findings.keys():
-                break
+            missing = responses.keys() - self.findings.keys()
+            if not missing:
+                return
+            if len(self.samples) >= MAX_POLLS:
+                self.report_budget_gap(stage, missing, poll_attempted=True)
+                return
+            if events is None:
+                return
             time.sleep(POLL_SECONDS)
 
     def classify(self, event, stage, observed, observed_monotonic):

@@ -107,7 +107,12 @@ Organizer synthetic detector replay remains separate.
 
 Each fixture is limited to 40 polls, 256 audit records, and a 250 ms
 database deadline per poll. Scheduled scenario checkpoints trigger reads,
-with 25 ms retry spacing if a watched denial is missing. Poll gap includes
+with 25 ms retry spacing if a watched denial is missing. An exhausted budget
+produces a monitor status event if a required request remains unobserved or
+a later checkpoint must be skipped. The report lists any unobserved request
+IDs, preserves authenticated findings and finishes as UNAVAILABLE when
+coverage is incomplete. A successful final poll may complete its checkpoint.
+Poll gap includes
 scenario work between checkpoints. Verification time includes authorization,
 witness checks and authenticated audit reads. Audit-to-observation time uses
 same-host wall-clock timestamps and includes scenario scheduling. The

@@ -1,11 +1,15 @@
+import io
+import json
 import secrets
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
 
+from console import Console
 from kig_core.attestation import attest
 from kig_core.audit_observer import AuditObserver
 from kig_core.guard import Guard
@@ -102,3 +106,22 @@ class AuditObserverTests(unittest.TestCase):
         self.assertEqual(report["status_events"][0]["rule"], "audit_integrity_failure")
         self.assertEqual(len(report["findings"]), 1)
         self.assertFalse(report["poll_samples"][-1]["verified"])
+
+    def test_live_monitor_reports_unavailable_when_checkpoints_are_skipped(self):
+        handler = Console.__new__(Console)
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = io.BytesIO()
+        with patch("kig_core.audit_observer.MAX_POLLS", 1):
+            handler.stream_monitor()
+
+        records = [json.loads(line) for line in handler.wfile.getvalue().splitlines()]
+        gaps = [item for item in records if item.get("rule") == "poll_budget_exhausted"]
+        self.assertTrue(gaps)
+        self.assertEqual({item["fixture"] for item in gaps}, {"approval", "recovery"})
+        self.assertTrue(all(item["type"] == "monitor_status" and not item["poll_attempted"] for item in gaps))
+        self.assertTrue(any(item["missing_request_ids"] for item in gaps))
+        complete = records[-1]
+        self.assertEqual((complete["type"], complete["status"]), ("complete", "UNAVAILABLE"))
+        self.assertTrue(all(len(report["poll_samples"]) == 1 for report in complete["report"].values()))
