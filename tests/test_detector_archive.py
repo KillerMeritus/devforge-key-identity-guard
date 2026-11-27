@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+from itertools import permutations
 from pathlib import Path
 import selectors
 import signal
@@ -9,6 +11,7 @@ import unittest
 from console_scenarios import time_machine
 from detection_cli import synthetic
 from kig_core.archive import ArchiveConflict, ArchiveUnavailable, canonical
+from kig_core.detector import analyze
 from kig_core.detector_archive import PRODUCER, evidence_archive, open_evidence_archive, replay, source_event
 
 
@@ -38,6 +41,32 @@ class DetectorArchiveTest(unittest.TestCase):
         self.assertEqual([item["receipt"] for item in result["findings"]],
                          [item["receipt"] for item in self.replay(self.events)["findings"]])
 
+    def test_connected_path_every_arrival_order(self):
+        hops = [event for event in self.events if "worker-hop" in event["event_id"]]
+        third = dict(hops[0], event_id="third-hop", source_service="archive", target_service="billing-log")
+        for observations in permutations([*hops, third]):
+            with self.subTest(order=[item["event_id"] for item in observations]):
+                alerts, _ = analyze(observations, self.approvals)
+                self.assertEqual(len(alerts), 3)
+                self.assertEqual({alert["anchor_event_id"] for alert in alerts},
+                                 {event["event_id"] for event in observations})
+        repeated = dict(hops[0], event_id="repeated-hop")
+        result = self.replay([*hops, third, repeated, third])
+        self.assertEqual(len(result["sources"]), 4)
+        self.assertEqual(len(result["findings"]), 4)
+        self.assertEqual({item["anchor_event_id"] for item in result["findings"]},
+                         {event["event_id"] for event in [*hops, third, repeated]})
+        self.assertTrue(all(item["receipt"]["state"] == "CONFIRMED" for item in result["findings"]))
+
+    def test_connected_path_uses_inclusive_correlation_horizon(self):
+        first, second = [event for event in self.events if "worker-hop" in event["event_id"]]
+        start = datetime.fromisoformat(first["event_time_utc"])
+        for seconds, expected in ((30, 2), (30.001, 0), (86400, 0)):
+            with self.subTest(seconds=seconds):
+                stamp = (start + timedelta(seconds=seconds)).isoformat()
+                later = dict(second, event_time_utc=stamp, received_time_utc=stamp)
+                self.assertEqual(len(analyze([first, later], self.approvals)[0]), expected)
+
     def test_conflicts_and_missing_source_fail_closed(self):
         report = self.replay(self.events)
         conflicting = dict(self.events[0], outcome="deny")
@@ -60,8 +89,11 @@ class DetectorArchiveTest(unittest.TestCase):
             self.archive.record_telemetry(self.writer, canonical(source_event(event)))
         command = """
 import signal, sys
+from datetime import datetime, timedelta
+from itertools import permutations
 from pathlib import Path
 from detection_cli import synthetic
+from kig_core.detector import analyze
 from kig_core.detector_archive import open_evidence_archive, replay
 
 def stop(*args):

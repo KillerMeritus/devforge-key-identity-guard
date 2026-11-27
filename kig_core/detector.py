@@ -177,9 +177,12 @@ class Detector:
         path.setdefault(edge, []).append(event)
         if not related:
             return []
-        alerts = [self.alert(event, "lateral_movement_candidate", [event, related[0]])]
-        alerts.extend(self.alert(previous, "lateral_movement_candidate", [previous, event])
-                      for previous in related)
+        pairs = [(event, related[0]), *((previous, event) for previous in related)]
+        alerts = []
+        for anchor, other in pairs:
+            finding = self.alert(anchor, "lateral_movement_candidate", [anchor, other])
+            if finding is not None:
+                alerts.append(finding)
         return alerts
 
     def finish(self):

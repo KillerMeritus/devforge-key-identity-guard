@@ -23,7 +23,7 @@ rid=$(python -c 'import json; print(json.load(open("run.json"))["nodes"]["A"]["r
 python evidence_passport.py statements/A.json --key judge-pins/A.pub --node A --challenge "$nonce" --request-id "$rid"
 ```
 
-The verifier returns exit 0 for VERIFIED and exit 1 for REJECTED. The demo signs revoked read decisions from both nodes. The event version is the version associated with that request. It does not attest the current database version. Worker keys, bearer tokens, plaintext and harness timings are outside the exported statement. A fresh challenge authenticates the signing interaction with a trusted worker. The event can be historical.
+The verifier returns exit 0 for STATEMENT AUTHENTICATED and exit 1 for REJECTED. Both nodes sign historical revoked-device denials and authorized teammate reads. The post-commit scenario also signs retired-version denials. The standalone verifier authenticates one statement. The demo harness independently compares the signed decision, reason and version to the expected scenario outcome. The event version is the version associated with that request. It does not attest the current database version. Worker keys, bearer tokens, plaintext and harness timings are outside the exported statement. A fresh challenge authenticates the signing interaction with a trusted worker. The event can be historical.
 
 ## Detector and console
 

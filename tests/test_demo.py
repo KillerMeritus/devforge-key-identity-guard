@@ -17,7 +17,7 @@ class DemoTest(unittest.TestCase):
                 self.assertEqual(result["active_version"], version)
                 self.assertTrue(result["audit_verified"])
                 self.assertEqual([entry["source"] for entry in result["timeline"]
-                                  if entry["label"] == "ML-DSA-65 revocation evidence verified"],
+                                  if entry["label"] == "ML-DSA-65 revocation evidence authenticated"],
                                  ["A", "B"])
                 self.assertEqual(result["continuity"]["prepared"]["reads"], 5)
                 self.assertEqual(result["continuity"]["prepared"]["errors"], 0)

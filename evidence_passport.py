@@ -40,5 +40,5 @@ if __name__ == '__main__':
                        args.node, args.challenge, args.request_id)
     except (OSError, ValueError):
         valid = False
-    print('VERIFIED' if valid else 'REJECTED')
+    print('STATEMENT AUTHENTICATED' if valid else 'REJECTED')
     raise SystemExit(0 if valid else 1)

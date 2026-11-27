@@ -27,4 +27,4 @@ The organizer adapter checks are mapped individually in [Adapter contract covera
 |---|---|---|
 | Persisted-state integrity | tests/test_security_matrix.py deletes grant, credential, approval and asset rows independently of audit history | Baseline trusts direct database writers. Experimental archive compares supported current projections. |
 | Causal detection | tests/test_architecture.py exercises independent flows, day-separated events, disconnected edges and approval boundaries | 30-second event-time policy. Finite synthetic replay. |
-| Verifiable decisions | evidence_passport.py, tests/test_architecture.py and the Chromium challenge scenario | Original signed bytes, pinned node key, verifier challenge and request binding. Historical worker decision only. |
+| Verifiable decisions | evidence_passport.py, tests/test_architecture.py and the Chromium challenge scenario | Original signed bytes, pinned node key, verifier challenge and request binding. Historical worker decisions for revocation, teammate reads and post-commit retired-version denial. Process termination and timings are harness observations. |

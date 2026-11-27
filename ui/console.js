@@ -95,7 +95,10 @@ byId('run').addEventListener('click', () => {
     for (const [id, details] of Object.entries({revocation: nodes, access: nodes, audit: result.evidence})) {
       const button = document.createElement('button');
       button.textContent = byId('check-' + id).textContent;
-      button.onclick = () => showEvidence(id, details);
+      button.onclick = () => showEvidence(
+        id === 'audit' ? 'Authenticated audit history' : 'Harness observations and signed worker decisions',
+        details
+      );
       byId('check-' + id).replaceChildren(button);
     }
     const prefix = prediction === result.active_version ? 'Prediction verified.' : 'Prediction differed.';

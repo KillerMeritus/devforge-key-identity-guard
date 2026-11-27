@@ -20,7 +20,6 @@ from urllib.request import ProxyHandler, Request, build_opener
 from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
 
-from kig_core.attestation import verify_attestation
 from evidence_passport import verify as verify_passport
 from kig_core.guard import Guard
 from kig_core.witness import RevocationWitness
@@ -254,28 +253,40 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None):
                                         teammate_request_id=teammate_request, revoked_status=denied,
                                         revoked_reason=result["reason"], revoked_request_id=revoked_request_id)
             event(name, "Revocation survived restart", request_id=revoked_request_id)
+            decisions = {
+                "revoked-device": (revoked_request_id, False, "revoked_device", expected),
+                "teammate-read": (teammate_request, True, "read", expected),
+            }
             if phase == "post":
                 old_status, old_result = read(port, teammate, 1)
                 require(old_status == 403 and old_result["reason"] == "wrong_version", "old version accepted")
                 observed_nodes[name]["old_version_status"] = old_status
+                decisions["retired-version"] = (old_result["request_id"], False, "wrong_version", 1)
             challenge = challenge_hex or secrets.token_hex(32)
             route = f"evidence/{revoked_request_id}/attestation"
             require(call(port, route, teammate, {"challenge": challenge})[0] == 403,
                     "reader obtained a signed audit record")
-            status, signed, _ = call(port, route, operator, {"challenge": challenge})
-            require(status == 200 and verify_attestation(
-                signed, trusted_public_keys[name], node=name, challenge=challenge,
-                request_id=revoked_request_id
-            ), "post-quantum attestation did not verify")
-            require(signed["event"]["reason"] == "revoked_device", "signed wrong decision")
-            require(verify_passport(signed, trusted_public_keys[name], name, challenge, revoked_request_id),
-                    "original signed bytes failed offline verification")
-            observed_nodes[name]["passport"] = signed
-            observed_nodes[name]["signed_request"] = signed["event"]["request_id"]
+            passports = {}
+            for label, (request_id, allowed, reason, version) in decisions.items():
+                route = f"evidence/{request_id}/attestation"
+                status, signed, _ = call(port, route, operator, {"challenge": challenge})
+                require(status == 200 and verify_passport(
+                    signed, trusted_public_keys[name], name, challenge, request_id
+                ), "worker statement did not authenticate")
+                statement = signed["event"]
+                require((statement["allowed"], statement["reason"], statement["version"]) ==
+                        (allowed, reason, version), "worker statement did not match the observed decision")
+                passports[label] = signed
+                if passport_dir is not None:
+                    filename = f"{name}.json" if label == "revoked-device" else f"{name}-{label}.json"
+                    (passport_dir / filename).write_text(json.dumps(signed))
+            observed_nodes[name]["passport"] = passports["revoked-device"]
+            observed_nodes[name]["additional_passports"] = {
+                label: signed for label, signed in passports.items() if label != "revoked-device"
+            }
+            observed_nodes[name]["signed_request"] = revoked_request_id
             observed_nodes[name]["challenge"] = challenge
-            if passport_dir is not None:
-                (passport_dir / f"{name}.json").write_text(json.dumps(signed))
-            event(name, "ML-DSA-65 revocation evidence verified", request_id=revoked_request_id)
+            event(name, "ML-DSA-65 revocation evidence authenticated", request_id=revoked_request_id)
         evidence = guard.evidence(operator)
         commits = [row for row in evidence if row["reason"] == "version_rotated"]
         require(len(commits) == (phase == "post"), "unexpected number of committed rotation events")

@@ -62,6 +62,18 @@ def main():
                     for node in ("A", "B"):
                         assert observed[node]["passport"]["challenge"] == "cb" * 32
                         assert observed[node]["passport"]["event"]["reason"] == "revoked_device"
+                        statements = observed[node]["additional_passports"]
+                        teammate = statements["teammate-read"]["event"]
+                        assert (teammate["allowed"], teammate["reason"], teammate["version"]) == (
+                            True, "read", int(outcome[1:])
+                        )
+                        if phase == "post":
+                            retired = statements["retired-version"]["event"]
+                            assert (retired["allowed"], retired["reason"], retired["version"]) == (
+                                False, "wrong_version", 1
+                            )
+                        else:
+                            assert "retired-version" not in statements
                     page.evaluate("window.scrollTo(0, 0)")
                     capture("recovery-" + phase)
                     print(f"PASS {phase}: {outcome}, both nodes verified, prediction checked, audit evidence opened")
