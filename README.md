@@ -201,6 +201,43 @@ Add `--json` to export recovery results.
 
 </details>
 
+### Scenario playbook (what each button actually runs)
+
+All runs use fresh synthetic fixtures. The dropdown is a scenario selector, not a live file editor. You do not enter real credentials, approval IDs or file contents. The only editable verification input is an optional 64-character lowercase hexadecimal challenge.
+
+| Security scenarios option | Orchestration | What to inspect |
+| --- | --- | --- |
+| Device revocation | Runs the post-commit recovery harness, including revocation, replacement credential enrollment, rotation and restart. | Expand Node A and B: `denial_status: 403`, `denial_reason: revoked_device`, `teammate_status: 200`, signed statement. |
+| Expired and consumed approvals | Both workers read v1; A attempts expired approval, A rotates with valid approval, B attempts reuse. | Before and After records; outcomes 403 `approval_expired`, 200 `version_rotated`, 403 `approval_missing`. Both workers deny v1 and read exact v2 contents. |
+| Competing rotations | Two valid approvals for v1 are submitted concurrently to A and B. | Exactly one 200 `version_rotated` and one 403 `wrong_version`; either worker may win. Both subsequently read v2 and reject v1. |
+| Interrupt before commit | Real worker A termination before rotation transaction commit; restart A. | Before, After and Supporting decisions: v1 survives; both workers deny revoked device and allow teammate. |
+| Interrupt after commit | Commit rotation, pause before response, terminate and restart A. | v2 survives; v1 rejected; teammate can read; revoked device denied. |
+| Damaged backup | Post-commit harness verifies intact encrypted key backup and a one-byte-modified copy. | `intact_accepted: true`, `damaged_accepted: false`, associated backup evidence. This is key-backup verification, not whole-store recovery. |
+| Stale-state quarantine (experimental) | Revokes owner, captures snapshot, records later denied read, reinstalls older snapshot; retrieves retained receipt; restores verified current snapshot. | Both stale reads 503; historical receipt CONFIRMED; restored teammate 200 and revoked device 403. |
+| Evidence Passport verification | Post-commit harness signs historical decisions using per-node ML-DSA-65 keys; verifies originals and rejects modified signed versions. | Expand each node's original and modified statement, pinned public key and policy appraisal. Three historical claims VERIFIED. |
+
+**How to run:** choose the exact option, inspect Preconditions / Expected invariant / Affected nodes, then click **Run scenario**. Expand the result rows. For Passport only, leave challenge blank for generated challenges or supply your own (generate one with `python -c 'import secrets; print(secrets.token_hex(32))'`). Other dropdown options disable the challenge field.
+
+### Other console sections
+
+| Section | Control and interpretation |
+| --- | --- |
+| Recovery Lab | Choose Before commit + Version 1, or After commit + Version 2. Optional verifier challenge as above. Click Run recovery test. The prediction is an expectation, never a control over the database. |
+| Incident timeline / Evidence Explorer | After recovery, click a timeline event to inspect request ID, audit identity, action, decision and reason when available. Harness-only observations are not worker-signed evidence. Click the PASS buttons for revocation, access and audit to inspect their evidence. |
+| Operational audit monitor | Click Run monitored fixtures. Runs separate post-commit recovery and approval fixtures, streaming authenticated findings, matching HTTP denials and separately scripted operator revocation. Expand findings and final poll report. No autonomous revocation. |
+| Detection View | Click Replay detector evidence. Runs a bounded synthetic service-event replay, not live worker traffic. Click Violation, Investigate or Timing rows to inspect source observations, receipts, explanations and uncertainty. |
+| Security Time Machine | Click Run archive restore. Click stale read, historical receipt and recovered-node rows to inspect the evidence. The independent archive survives the working-store snapshot restore. |
+
+**Navigation:** Scenarios, Recovery, Evidence, Monitor, Detection and Archive are
+in-page anchor links. They scroll to sections of the same console rather than
+open separate pages. Results stay visible until replaced or the page is reloaded.
+
+**Status legend:** PASS means the fixture assertions succeeded; FAIL means an
+assertion failed; UNAVAILABLE means execution or evidence could not be verified;
+NOT TESTED means no completed test for that selection. A wrong prediction does
+not change the actual recovery outcome. Measurements vary across runs.
+
+
 ## Architecture
 
 ```mermaid
