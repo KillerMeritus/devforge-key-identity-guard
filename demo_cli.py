@@ -240,8 +240,6 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
             for node, result in cutoff.items():
                 event(node, "Old key version rejected", version=1, **result)
             continuity_results["committed"] = continuity(2, "Teammate reads after commit before rotation reply")
-            if observer:
-                observer.current_versions["brief"] = 2
             require(not reconnect.done(), "rotation replied before the post-commit probe")
         if observer:
             observer.poll(f"At {phase}-commit checkpoint, before worker termination", denied_responses)
@@ -260,6 +258,8 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
         expected = 1 if phase == "pre" else 2
         observed_nodes = {}
         policy_expectations, policy_statements = {}, {}
+        device_refs = {"owner": guard.credential_reference(laptop),
+                       "teammate": guard.credential_reference(teammate)}
         for name, port in (("A", a), ("B", b)):
             result = checked_read(port, teammate, expected)
             if name == "A":
@@ -291,7 +291,8 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
             for label, (request_id, allowed, reason, version) in decisions.items():
                 actor = "owner" if label == "revoked-device" else "teammate"
                 expectation = policy_expectations.setdefault(
-                    label, {"actor": actor, "asset": "brief", "version": version, "nodes": {}}
+                    label, {"actor": actor, "credential_ref": device_refs[actor],
+                            "asset": "brief", "version": version, "nodes": {}}
                 )
                 expectation["nodes"][name] = {"request_id": request_id, "challenge": challenge}
                 route = f"evidence/{request_id}/attestation"
@@ -357,6 +358,11 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
         damaged_accepted = guard.verify_backup("brief", expected, damaged, "A")
         require(not damaged_accepted, "damaged backup accepted")
         checked_read(a, teammate, expected)
+        backup_evidence = [record for record in guard.evidence(operator)
+                           if record["action"] == "verify_backup" and record["target"] == "brief"]
+        require([(record["allowed"], record["reason"]) for record in backup_evidence] ==
+                [(True, "verified_backup"), (False, "rejected_backup")],
+                "authenticated backup decisions did not match verification")
         event("Audit", "Damaged key backup rejected")
         status, response, headers = call(a, "message", operator, {})
         require(status == 501 and response == {"error": "messaging not supported in this track"},
@@ -370,7 +376,7 @@ def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None, verify_
                             "request_id": before["request_id"]},
                     last_denial_ms=round(max(timings.values()), 2), recovery_ms=round(recovery_ms, 2),
                     backup={"node": "A", "version": expected, "intact_accepted": intact_accepted,
-                            "damaged_accepted": damaged_accepted},
+                            "damaged_accepted": damaged_accepted, "audit_records": backup_evidence},
                     evidence=guard.evidence(operator), proof_verified=True, audit_verified=True,
                     continuity=continuity_results, nodes=observed_nodes, cutoff=cutoff,
                     claim_results=claim_results, monitor=observer.result() if observer else None,

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from pathlib import Path
 import secrets
+import base64
 import sqlite3
 import tempfile
 import time
@@ -120,16 +121,21 @@ def approval_lab(competing, publish_audit=None):
         guard = Guard(state / "demo.sqlite", *keys, witness=witness)
         admin, reader = guard.enroll("operator", "admin"), guard.enroll("teammate")
         observer = AuditObserver(guard, admin, publish_audit) if publish_audit else None
-        guard.seed_file("brief", b"synthetic approval lab", "teammate")
+        content = b"synthetic approval lab"
+        guard.seed_file("brief", content, "teammate")
         ports = {node: start(stack, state, node, state / f"{node}.log")[0] for node in ("A", "B")}
         approval = guard.approve_rotation("operator", "brief", 1, time.time() + 120)
 
         def observe(node, action, token, fields):
             status, response, _ = call(ports[node], action, token, fields)
-            require(status == 200 or "body" not in response, "denial disclosed protected content")
+            body_withheld = {"body", "ciphertext", "proof", "token"}.isdisjoint(response)
+            require(status == 200 or body_withheld, "denial disclosed protected content")
+            if action == "read" and status == 200:
+                require(base64.b64decode(response.get("body", ""), validate=True) == content,
+                        "worker returned incorrect asset contents")
             return dict(node=node, status=status, reason=response.get("reason"),
                         request_id=response.get("request_id"),
-                        body_withheld={"body", "ciphertext", "proof", "token"}.isdisjoint(response))
+                        body_withheld=body_withheld)
 
         def read(node, version):
             result = observe(node, "read", reader, {"target": "brief", "version": version})
@@ -170,7 +176,6 @@ def approval_lab(competing, publish_audit=None):
                     and event["allowed"] == (outcome["status"] == 200), "rotation audit mismatch")
             evidence.append(event)
         if observer:
-            observer.current_versions["brief"] = 2
             observer.poll("After approval and retired-version checks",
                           [item for item in outcomes + after if item["status"] == 403])
         return dict(before=before, after=after, outcomes=outcomes, evidence=evidence,

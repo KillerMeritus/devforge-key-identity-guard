@@ -154,7 +154,7 @@ class Guard:
             result["request_id"] = secrets.token_hex(16)
             sequence, tag = self.record(db, dict(node=node, actor=actor, role=role, action=action,
                                  target=self.audit_target(db, action, target),
-                                 credential_ref=self.audit_target(db, "credential", self.digest(token))
+                                 credential_ref=self.credential_reference(token)
                                  if identity else None,
                                  timestamp=time.time(), allowed=result["allowed"],
                                  decision="allow" if result["allowed"] else "deny",
@@ -176,6 +176,10 @@ class Guard:
     def identity(self, db, token):
         return db.execute("SELECT actor,role,revoked FROM devices WHERE token=?",
                           (self.digest(token),)).fetchone()
+
+    def credential_reference(self, token):
+        """Derive the opaque audit identity of a provisioned device."""
+        return self.audit_target(None, "credential", self.digest(token))
 
     def audit_target(self, db, action, target):
         """Record configured asset IDs and opaque references to other request input."""

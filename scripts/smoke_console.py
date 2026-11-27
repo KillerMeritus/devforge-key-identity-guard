@@ -132,6 +132,9 @@ def main():
                 assert sorted(item["status"] for item in lab_results["competing"]["outcomes"]) == [200, 403]
                 assert [lab_results[phase]["active_version"] for phase in ("pre", "post")] == [1, 2]
                 assert lab_results["backup"]["intact_accepted"] and not lab_results["backup"]["damaged_accepted"]
+                assert [event["reason"] for event in lab_results["backup"]["audit_records"]] == [
+                    "verified_backup", "rejected_backup"
+                ]
                 assert {item["status"] for item in lab_results["quarantine"]["quarantine"].values()} == {503}
                 page.locator("#scenario-lab").scroll_into_view_if_needed()
                 capture("scenario-approval")

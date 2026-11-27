@@ -19,7 +19,7 @@ class AuditObserver:
         self.findings = {}
         self.problems = {}
         self.previous_poll = None
-        self.current_versions = {}
+        self.rotations = {}
 
     def report_budget_gap(self, stage, missing, *, poll_attempted):
         missing_ids = sorted(missing)
@@ -95,18 +95,24 @@ class AuditObserver:
             time.sleep(POLL_SECONDS)
 
     def classify(self, event, stage, observed, observed_monotonic):
+        action, reason = event["action"], event["reason"]
+        version, target = event.get("version"), event.get("target")
+        if (action == "rotate" and reason == "version_rotated" and event.get("decision") == "allow"
+                and event.get("allowed") is True and type(version) is int and version > 1 and target):
+            self.rotations[target] = event
         if event.get("decision") != "deny":
             return
-        action, reason = event["action"], event["reason"]
+        rotation = None
         if action == "read" and reason == "revoked_device":
             rule, explanation = "revoked_device_read", "Worker denied a read from a revoked device."
         elif action == "rotate" and reason.startswith("approval_"):
             rule, explanation = "invalid_rotation_approval", "Worker denied a rotation with an invalid approval."
         elif action == "read" and reason == "wrong_version":
-            current = self.current_versions.get(event["target"])
-            if current is not None and type(event["version"]) is int and event["version"] < current:
+            previous_rotation = self.rotations.get(target)
+            if previous_rotation is not None and type(version) is int and version < previous_rotation["version"]:
+                rotation = previous_rotation
                 rule = "retired_version_read"
-                explanation = "Worker rejected a version older than the fixture's verified readable version."
+                explanation = "Worker rejected an older version after an authenticated rotation commit."
             else:
                 rule, explanation = "version_read_rejected", "Worker rejected the requested key version."
         elif action in {"read", "rotate", "revoke", "enroll"}:
@@ -133,6 +139,10 @@ class AuditObserver:
             "containment": "UNCONFIRMED", "administrative_response": "NONE",
             "recommendation": "Review related denied requests." if related else None,
         }
+        if rotation is not None:
+            finding["rotation_evidence"] = {
+                field: rotation[field] for field in ("id", "request_id", "node", "target", "version")
+            }
         self.findings[request_id] = finding
         self.publish({"type": "finding", **finding})
 

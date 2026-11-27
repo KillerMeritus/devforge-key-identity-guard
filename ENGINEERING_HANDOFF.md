@@ -80,7 +80,7 @@ version. These claims concern the signed requests, not the current database,
 the age of its state, or whether a process actually terminated.
 
 For an offline check, provision `A.pub`, `B.pub` and the expectations through
-your trusted channel. The JSON has `actor` and/or `credential_ref`, `asset`,
+your trusted channel. The JSON has `actor` and/or `credential_ref` (required for revoked-device denial), `asset`,
 `version`, and `nodes.A` and `nodes.B` with `challenge` and `request_id`.
 The existing demo export writes the three `*.expected.json` files into
 `--trust-dir` alongside its separately provisioned public keys. A real verifier
@@ -103,7 +103,11 @@ Related denials are linked only within the same fixture, credential and
 asset, within five seconds by audit time. Links are for investigation. The
 observer performs no administrative actions. Audit unavailability and
 integrity failures are surfaced without creating worker event identities.
-Organizer synthetic detector replay remains separate.
+The monitor labels a denial as a retired-version read only when an earlier
+authenticated rotation record for the same asset established a newer
+version. Its finding includes that rotation record's identity. Other
+version denials keep a generic label. Organizer synthetic detector replay
+remains separate.
 
 Each fixture is limited to 40 polls, 256 audit records, and a 250 ms
 database deadline per poll. Scheduled scenario checkpoints trigger reads,

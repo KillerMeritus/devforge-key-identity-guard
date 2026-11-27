@@ -29,7 +29,7 @@ def appraise(claim, statements, expected, trusted_keys):
     bindings = expected.get("nodes")
     identity = {name: expected[name] for name in ("actor", "credential_ref") if name in expected}
     asset, version = expected.get("asset"), expected.get("version")
-    if not isinstance(bindings, dict) or not asset or version is None or not identity:
+    if not isinstance(bindings, dict) or not asset or version is None or not identity or (claim == "revoked-device" and "credential_ref" not in identity):
         return "INSUFFICIENT EVIDENCE"
     if (not isinstance(asset, str) or type(version) is not int or version < 1
             or any(not isinstance(value, str) or not value for value in identity.values())

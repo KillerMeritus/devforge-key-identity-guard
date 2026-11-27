@@ -21,7 +21,7 @@ class HistoricalClaimTests(unittest.TestCase):
         self.keys = {node: MLDSA65PrivateKey.generate() for node in ("A", "B")}
         self.pins = {node: key.public_key().public_bytes_raw() for node, key in self.keys.items()}
         self.expected = {
-            "actor": "owner", "asset": "brief", "version": 2,
+            "actor": "owner", "credential_ref": "ref:original-device", "asset": "brief", "version": 2,
             "nodes": {node: {"challenge": "ab" * 32, "request_id": f"req-{node}"} for node in self.keys},
         }
 
@@ -30,6 +30,7 @@ class HistoricalClaimTests(unittest.TestCase):
         challenge = changes.pop("challenge", expected["challenge"])
         event = dict(node=node, request_id=expected["request_id"], actor="owner",
                      target="brief", version=2, action="read", decision="deny",
+                     credential_ref="ref:original-device",
                      allowed=False, reason="revoked_device")
         return attest(self.keys[node], node, challenge, {**event, **changes})
 
@@ -50,7 +51,7 @@ class HistoricalClaimTests(unittest.TestCase):
             ([a], self.expected, self.pins),
             ([a, b], self.expected, {"A": self.pins["A"]}),
             ([a, b], dict(self.expected, nodes={"A": self.expected["nodes"]["A"]}), self.pins),
-            ([a, b], {key: value for key, value in self.expected.items() if key != "actor"}, self.pins),
+            ([a, b], {key: value for key, value in self.expected.items() if key != "credential_ref"}, self.pins),
             ([a, b], {key: value for key, value in self.expected.items() if key != "version"}, self.pins),
         ):
             self.assertEqual(appraise("revoked-device", evidence, expectations, pins),
@@ -60,7 +61,7 @@ class HistoricalClaimTests(unittest.TestCase):
         a = self.statement("A")
         for change in (
             {"allowed": True, "decision": "allow"}, {"reason": "wrong_version"},
-            {"actor": "someone-else"}, {"target": "other"}, {"version": 1}, {"action": "rotate"},
+            {"actor": "someone-else"}, {"credential_ref": "ref:other-device"}, {"target": "other"}, {"version": 1}, {"action": "rotate"},
             {"request_id": "another-request"}, {"challenge": "cd" * 32},
         ):
             with self.subTest(change=change):
@@ -106,6 +107,31 @@ class AuditObserverTests(unittest.TestCase):
         self.assertEqual(report["status_events"][0]["rule"], "audit_integrity_failure")
         self.assertEqual(len(report["findings"]), 1)
         self.assertFalse(report["poll_samples"][-1]["verified"])
+
+    def test_retired_version_requires_preceding_rotation_for_same_asset(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        guard = Guard(root / "demo.sqlite", secrets.token_bytes(32), secrets.token_bytes(32))
+        operator, reader = guard.enroll("operator", "admin"), guard.enroll("reader")
+        guard.seed_file("brief", b"synthetic", "reader")
+        guard.seed_file("other", b"synthetic", "reader")
+        observer = AuditObserver(guard, operator, lambda _: None)
+        early = guard.execute("A", reader, "read", "brief", version=0)
+        approval = guard.approve_rotation("operator", "brief", 1, float("inf"))
+        rotation = guard.execute("A", operator, "rotate", "brief", version=1, approval=approval)
+        retired = guard.execute("B", reader, "read", "brief", version=1)
+        future = guard.execute("B", reader, "read", "brief", version=3)
+        other = guard.execute("B", reader, "read", "other", version=2)
+        observer.poll("observe batch")
+
+        self.assertEqual(rotation["reason"], "version_rotated")
+        findings = observer.findings
+        for probe in (early, future, other):
+            self.assertEqual(findings[probe["request_id"]]["rule"], "version_read_rejected")
+            self.assertNotIn("rotation_evidence", findings[probe["request_id"]])
+        finding = findings[retired["request_id"]]
+        self.assertEqual(finding["rule"], "retired_version_read")
+        self.assertEqual(finding["rotation_evidence"]["request_id"], rotation["request_id"])
+        self.assertLess(finding["rotation_evidence"]["id"], finding["event_id"])
 
     def test_live_monitor_reports_unavailable_when_checkpoints_are_skipped(self):
         handler = Console.__new__(Console)

@@ -423,7 +423,7 @@ class ArchivedGuard:
                 sequence, tag = guard.record(db, dict(
                     node=self.node, actor=actor, role=role, action=action,
                     target=guard.audit_target(db, action, target),
-                    credential_ref=guard.audit_target(db, "credential", guard.digest(token))
+                    credential_ref=guard.credential_reference(token)
                     if identity else None,
                     timestamp=time.time(), allowed=result["allowed"],
                     decision="allow" if result["allowed"] else "deny", reason=result["reason"],
