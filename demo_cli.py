@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PrivateKey
 from cryptography.hazmat.primitives.asymmetric.mlkem import MLKEM768PrivateKey
 
 from kig_core.attestation import verify_attestation
+from evidence_passport import verify as verify_passport
 from kig_core.guard import Guard
 from kig_core.witness import RevocationWitness
 
@@ -95,7 +96,7 @@ def start(stack, state, node, log, port=None, checkpoint=None, *, archive=False)
     return port, process
 
 
-def run(phase):
+def run(phase, *, challenge_hex=None, passport_dir=None, trust_dir=None):
     timeline = []
 
     def event(source, label, **fields):
@@ -109,6 +110,13 @@ def run(phase):
             node: MLDSA65PrivateKey.from_seed_bytes(seed).public_key().public_bytes_raw()
             for node, seed in signing_seeds.items()
         }
+        if passport_dir is not None:
+            if trust_dir is None or passport_dir.resolve() == trust_dir.resolve():
+                raise ValueError("separate new passport and provisioning directories required")
+            trust_dir.mkdir(mode=0o700)
+            passport_dir.mkdir(mode=0o700)
+            for node, public_bytes in trusted_public_keys.items():
+                (trust_dir / f"{node}.pub").write_bytes(public_bytes)
         key_files = dict(zip(("audit", "storage", "backup"), keys))
         key_files.update({f"attestation-{node}": seed for node, seed in signing_seeds.items()})
         for name, key in key_files.items():
@@ -250,7 +258,7 @@ def run(phase):
                 old_status, old_result = read(port, teammate, 1)
                 require(old_status == 403 and old_result["reason"] == "wrong_version", "old version accepted")
                 observed_nodes[name]["old_version_status"] = old_status
-            challenge = secrets.token_hex(32)
+            challenge = challenge_hex or secrets.token_hex(32)
             route = f"evidence/{revoked_request_id}/attestation"
             require(call(port, route, teammate, {"challenge": challenge})[0] == 403,
                     "reader obtained a signed audit record")
@@ -260,6 +268,13 @@ def run(phase):
                 request_id=revoked_request_id
             ), "post-quantum attestation did not verify")
             require(signed["event"]["reason"] == "revoked_device", "signed wrong decision")
+            require(verify_passport(signed, trusted_public_keys[name], name, challenge, revoked_request_id),
+                    "original signed bytes failed offline verification")
+            observed_nodes[name]["passport"] = signed
+            observed_nodes[name]["signed_request"] = signed["event"]["request_id"]
+            observed_nodes[name]["challenge"] = challenge
+            if passport_dir is not None:
+                (passport_dir / f"{name}.json").write_text(json.dumps(signed))
             event(name, "ML-DSA-65 revocation evidence verified", request_id=revoked_request_id)
         evidence = guard.evidence(operator)
         commits = [row for row in evidence if row["reason"] == "version_rotated"]
@@ -290,8 +305,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kill-at", choices=["pre", "post"], default="pre")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--passport-dir", type=Path)
+    parser.add_argument("--trust-dir", type=Path)
+    parser.add_argument("--challenge")
     options = parser.parse_args()
-    result = run(options.kill_at)
+    result = run(options.kill_at, challenge_hex=options.challenge, passport_dir=options.passport_dir, trust_dir=options.trust_dir)
     if options.json:
         print(json.dumps(result))
     else:

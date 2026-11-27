@@ -37,6 +37,26 @@ class SecurityMatrix(unittest.TestCase):
             provision_archive(root, guard)
         return root, guard, operator, another_operator, reader, approved, expired
 
+    def test_baseline_audit_does_not_attest_current_grant(self):
+        _, guard, operator, _, reader, _, _ = self.fixture()
+        self.assertTrue(guard.execute("A", reader, "read", "brief", version=1)["allowed"])
+        before = guard.evidence(operator)
+        with guard.transaction() as db:
+            db.execute("DELETE FROM grants WHERE actor=? AND file=?", ("reader", "brief"))
+        self.assertEqual(before, guard.evidence(operator))
+        self.assertFalse(guard.execute("B", reader, "read", "brief", version=1)["allowed"])
+
+    def test_baseline_audit_scope_for_other_persisted_rows(self):
+        for table, column in (("devices", "token"), ("approvals", "id"), ("files", "id")):
+            with self.subTest(table=table):
+                _, guard, operator, _, reader, approval, _ = self.fixture()
+                before = guard.evidence(operator)
+                value = {"devices": guard.digest(reader), "approvals": approval, "files": "brief"}[table]
+                with guard.transaction() as db:
+                    deleted = db.execute(f"DELETE FROM {table} WHERE {column}=?", (value,))
+                    self.assertEqual(deleted.rowcount, 1)
+                self.assertEqual(before, guard.evidence(operator))
+
     def test_protected_routes_authentication_and_role_matrix(self):
         for archive in (False, True):
             with self.subTest(archive=archive), ExitStack() as stack:

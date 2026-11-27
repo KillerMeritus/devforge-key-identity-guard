@@ -7,7 +7,7 @@ import statistics
 import time
 
 from .archive import Archive, ArchiveConflict, canonical
-from .detector import RULE_DETAILS, UNCERTAINTY_SECONDS, analyze, approved, corrected, timestamp
+from .detector import UNCERTAINTY_SECONDS, analyze, approved, corrected, timestamp
 from .worker_archive import private_write
 
 PRODUCER = "replay-detector"
@@ -113,11 +113,13 @@ def replay(archive, writer, investigator, events, approvals):
     findings = []
     for alert in alerts:
         anchor, rule = alert["anchor_event_id"], alert["rule"]
-        version, classification, explanation = RULE_DETAILS[rule]
+        version = alert["rule_version"]
+        classification = alert["classification"]
+        explanation = alert["explanation"]
         source = retained[anchor]
         evidence = [retained[eid] for eid in alert["evidence_event_ids"]]
         approval, proof, snapshot = approval_context(unique[anchor], approvals)
-        event_id = f"alert-{hashlib.sha256(canonical([anchor, rule])).hexdigest()}"
+        event_id = f"alert-{hashlib.sha256(canonical([anchor, rule, version])).hexdigest()}"
         derived = {
             **envelope(event_id, source["actor"], "detector_alert", rule,
                        max(item["received_ms"] for item in evidence), source["timing"]["corrected_ms"]),

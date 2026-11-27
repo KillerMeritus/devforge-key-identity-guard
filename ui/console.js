@@ -37,7 +37,7 @@ async function runScenario(route, statusId, checks, render) {
   text(statusId, 'Running the local scenario…');
   try {
     const response = await fetch('/run/' + route, {
-      method: 'POST', headers: {'X-Recovery-Console': 'run'}
+      method: 'POST', headers: {'X-Recovery-Console': 'run', ...(['pre','post'].includes(route) && byId('challenge').value ? {'X-Verification-Challenge': byId('challenge').value} : {})}
     });
     const result = await response.json();
     if (!response.ok) {
@@ -92,6 +92,12 @@ byId('run').addEventListener('click', () => {
       nodes[node].revoked_status === 403 && nodes[node].revoked_reason === 'revoked_device'));
     measured('access', allNodes.every(node => nodes[node].teammate_status === 200));
     measured('audit', result.audit_verified === true);
+    for (const [id, details] of Object.entries({revocation: nodes, access: nodes, audit: result.evidence})) {
+      const button = document.createElement('button');
+      button.textContent = byId('check-' + id).textContent;
+      button.onclick = () => showEvidence(id, details);
+      byId('check-' + id).replaceChildren(button);
+    }
     const prefix = prediction === result.active_version ? 'Prediction verified.' : 'Prediction differed.';
     text('result', prefix + ' Predicted v' + prediction + ', observed v' + result.active_version +
       '. Last denial ' + result.last_denial_ms + ' ms after revoke commit.');

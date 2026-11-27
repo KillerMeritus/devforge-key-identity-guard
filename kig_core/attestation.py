@@ -16,8 +16,10 @@ def payload(node, challenge, event):
 
 
 def attest(private_key, node, challenge, event):
-    signature = private_key.sign(payload(node, challenge, event), context=CONTEXT)
+    signed_bytes = payload(node, challenge, event)
+    signature = private_key.sign(signed_bytes, context=CONTEXT)
     return {"algorithm": ALGORITHM, "node": node, "challenge": challenge, "event": event,
+            "signed_bytes": base64.b64encode(signed_bytes).decode("ascii"),
             "signature": base64.b64encode(signature).decode("ascii")}
 
 

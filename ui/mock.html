@@ -23,6 +23,7 @@
     <div class="controls">
       <label>Crash checkpoint<select id="phase"><option value="pre">Before commit</option><option value="post">After commit</option></select></label>
       <label>Predict the surviving version<select id="prediction"><option value="1">Version 1</option><option value="2">Version 2</option></select></label>
+      <label>Optional verifier challenge (64 lowercase hex digits)<input id="challenge" maxlength="64" pattern="[0-9a-f]{64}"></label>
       <button class="primary" id="run">Run recovery test</button>
     </div>
     <p id="result" class="status" role="status">Ready to run against fresh synthetic state.</p>
@@ -47,6 +48,11 @@
 
   <section class="panel invariant-panel" aria-labelledby="invariant-title">
     <h2 id="invariant-title">Security invariants</h2>
+    <details><summary>Which authority supports each result?</summary>
+    <dl><dt>Baseline workers A and B</dt><dd>Both read the same SQLite authorization rows. The audit chain authenticates recorded decisions.</dd>
+    <dt>Revocation witness</dt><dd>A separate checkpoint anchors revocation history across working-store restores.</dd>
+    <dt>Worker signatures</dt><dd>Each node signs its own historical decision and verifier challenge. Recovery times come from the harness.</dd>
+    <dt>Experimental archive</dt><dd>Confirmed receipts bind source events outside the working snapshot. Detector inputs are organizer-style synthetic observations.</dd></dl></details>
     <dl class="invariants">
       <div><dt>Revocation on both nodes</dt><dd id="check-revocation" data-state="pending">PENDING</dd></div>
       <div><dt>Authorized teammate access</dt><dd id="check-access" data-state="pending">PENDING</dd></div>

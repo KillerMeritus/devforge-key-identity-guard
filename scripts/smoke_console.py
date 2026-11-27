@@ -1,5 +1,6 @@
 """Exercise both baseline recovery cases in Chromium with Playwright."""
 import argparse
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -35,6 +36,7 @@ def main():
                     ("pre", "v1", "Prediction verified."),
                     ("post", "v2", "Prediction differed."),
                 ):
+                    page.locator("#challenge").fill("cb" * 32)
                     page.locator("#phase").select_option(phase)
                     page.locator("#prediction").select_option("1")
                     with page.expect_response(lambda response: response.url.endswith("/run/" + phase), timeout=20000) as run:
@@ -55,6 +57,11 @@ def main():
                             expect(page.locator("#details" + node)).to_contain_text("v1 rejected with HTTP 403")
                     for check in ("revocation", "access", "audit"):
                         expect(page.locator("#check-" + check)).to_have_text("PASS")
+                    page.locator("#check-revocation button").click()
+                    observed = json.loads(page.locator("#evidence").inner_text())
+                    for node in ("A", "B"):
+                        assert observed[node]["passport"]["challenge"] == "cb" * 32
+                        assert observed[node]["passport"]["event"]["reason"] == "revoked_device"
                     page.evaluate("window.scrollTo(0, 0)")
                     capture("recovery-" + phase)
                     print(f"PASS {phase}: {outcome}, both nodes verified, prediction checked, audit evidence opened")
@@ -63,7 +70,9 @@ def main():
                 assert run.value.status == 200
                 expect(page.locator("#check-detector")).to_have_text("PASS")
                 expect(page.locator("#detections")).to_contain_text("order uncertain")
-                page.locator("#detections .event").first.click()
+                page.get_by_role("button", name="Investigate", exact=False).filter(has_text="access outside approval").click()
+                expect(page.locator("#evidence")).to_contain_text("Approval boundary overlaps")
+                page.get_by_role("button", name="Violation", exact=False).first.click()
                 expect(page.locator("#evidence")).to_contain_text("policy_violation")
                 expect(page.locator("#evidence")).to_contain_text("explanation")
                 expect(page.locator("#evidence")).to_contain_text("CONFIRMED")

@@ -1,5 +1,6 @@
 """Serve the local operator console and its fixed synthetic scenarios."""
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import re
 import json
 from pathlib import Path
 import sys
@@ -40,7 +41,12 @@ class Console(BaseHTTPRequestHandler):
         self.respond(200, (UI / filename).read_bytes(), content_type)
 
     def do_POST(self):
-        routes = {"/run/pre": lambda: run("pre"), "/run/post": lambda: run("post"),
+        challenge = self.headers.get("X-Verification-Challenge")
+        if challenge is not None and not re.fullmatch("[0-9a-f]{64}", challenge):
+            self.respond(400, b'{"error":"invalid_challenge"}')
+            return
+        routes = {"/run/pre": lambda: run("pre", challenge_hex=challenge),
+                  "/run/post": lambda: run("post", challenge_hex=challenge),
                   "/run/detection": detector_replay, "/run/archive": time_machine}
         scenario = routes.get(self.path)
         if (

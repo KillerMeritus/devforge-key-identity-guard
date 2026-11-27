@@ -4,6 +4,7 @@ from datetime import datetime
 import time
 
 
+CORRELATION_SECONDS = 30
 LATENESS_SECONDS = 5
 UNCERTAINTY_SECONDS = 0.125
 ROLE_TARGETS = {
@@ -13,10 +14,10 @@ ROLE_TARGETS = {
 }
 SERVICE_EDGES = {"service-reader": {("reports", "catalog")}}
 RULE_DETAILS = {
-    "unexpected_role_change": (1, "policy_violation", "Successful grant lacked a matching active approval."),
-    "access_outside_approval": (1, "policy_violation", "Allowed access exceeded the approval scope or validity."),
-    "review_after_role_change": (1, "investigate", "Allowed access followed an unexpected role change in this session."),
-    "lateral_movement_candidate": (1, "investigate", "Related observations crossed distinct unexpected service edges."),
+    "unexpected_role_change": (2, "policy_violation", "Successful grant lacked a matching active approval."),
+    "access_outside_approval": (2, "policy_violation", "Allowed access exceeded the approval scope or validity."),
+    "review_after_role_change": (2, "investigate", "Allowed access followed an unexpected role change in this session."),
+    "lateral_movement_candidate": (2, "investigate", "Related observations crossed distinct unexpected service edges."),
     "unexpected_allowed_access": (1, "investigate", "The role accessed a service outside its expected service set."),
 }
 
@@ -29,15 +30,23 @@ def corrected(event):
     return timestamp(event["event_time_utc"]) - int(event["source_clock_offset_ms"]) / 1000
 
 
-def approved(event, changes):
-    approval = changes.get(event["approval_id"])
+def scope_matches(event, approval):
     if not approval:
         return False
     return (
         approval["subject"] == event["actor"]
         and approval["operation"] == "grant_role"
         and approval["role"] == event["role_after"]
+        and bool(approval.get("scope"))
+
         and set(event.get("requested_scope", ())).issubset(approval.get("scope", ()))
+    )
+
+
+def approved(event, changes):
+    approval = changes.get(event["approval_id"])
+    return (
+        scope_matches(event, approval)
         and timestamp(approval["valid_from_utc"]) <= corrected(event)
         < timestamp(approval["valid_until_utc"])
     )
@@ -63,6 +72,13 @@ class Detector:
             return None
         self.emitted.add(key)
         version, classification, explanation = RULE_DETAILS[rule]
+        approval = self.approvals.get(event.get("approval_id"))
+        if (scope_matches(event, approval) and rule in {"unexpected_role_change", "access_outside_approval"}
+                and (rule == "unexpected_role_change" or event["target_service"] in approval["scope"])):
+            if any(abs(corrected(event) - timestamp(approval[field])) <= UNCERTAINTY_SECONDS
+                   for field in ("valid_from_utc", "valid_until_utc")):
+                classification = "investigate"
+                explanation = "Approval boundary overlaps the observation clock uncertainty."
         return {
             "anchor_event_id": anchor, "rule": rule, "actor": event["actor"],
             "rule_version": version, "classification": classification, "explanation": explanation,
@@ -81,11 +97,16 @@ class Detector:
         if event_id in self.receipts:
             return [], []
         self.receipts[event_id] = time.perf_counter() if received_at is None else received_at
-        key = event["actor"], event["session_id"]
+        key = event["actor"], event["session_id"], event["correlation_id"]
         when = corrected(event)
         late = abs(timestamp(event["received_time_utc"]) - when) > LATENESS_SECONDS
         alerts = []
         notes = [{"event": event_id, "reason": "arrival_outside_window"}] if late else []
+
+        approval = self.approvals.get(event["approval_id"])
+        if approval and approved(event, self.approvals) and any(abs(when - timestamp(approval[field])) <= UNCERTAINTY_SECONDS
+                            for field in ("valid_from_utc", "valid_until_utc")):
+            notes.append({"event": event_id, "reason": "approval_time_uncertain"})
 
         if event["action"] == "role_change" and event["outcome"] == "success":
             if not approved(event, self.approvals):
@@ -133,7 +154,7 @@ class Detector:
                 if read_id not in self.uncertain:
                     notes.append({"event": read_id, "reason": "order_uncertain"})
                     self.uncertain.add(read_id)
-            elif delta > 0:
+            elif 0 < delta <= CORRELATION_SECONDS:
                 earlier.append((change_time, change))
         if earlier:
             _, cause = max(earlier, key=lambda item: (item[0], item[1]["event_id"]))
@@ -146,16 +167,19 @@ class Detector:
         edge = event["source_service"], event["target_service"]
         if role not in SERVICE_EDGES or edge in SERVICE_EDGES[role]:
             return []
-        path = self.paths[(*key, event["correlation_id"])]
-        other_edge = next((candidate for candidate in path if candidate != edge), None)
-        is_second_edge = len(path) == 1 and other_edge is not None
+        path = self.paths[key]
+        related = [
+            previous for previous_edge, observations in path.items()
+            if previous_edge != edge and (previous_edge[1] == edge[0] or edge[1] == previous_edge[0])
+            for previous in observations
+            if abs(corrected(previous) - corrected(event)) <= CORRELATION_SECONDS
+        ]
         path.setdefault(edge, []).append(event)
-        if other_edge is None:
+        if not related:
             return []
-        alerts = [self.alert(event, "lateral_movement_candidate", [event, path[other_edge][0]])]
-        if is_second_edge:
-            alerts.extend(self.alert(anchor, "lateral_movement_candidate", [anchor, event])
-                          for anchor in path[other_edge])
+        alerts = [self.alert(event, "lateral_movement_candidate", [event, related[0]])]
+        alerts.extend(self.alert(previous, "lateral_movement_candidate", [previous, event])
+                      for previous in related)
         return alerts
 
     def finish(self):

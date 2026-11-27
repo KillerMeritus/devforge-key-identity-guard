@@ -281,3 +281,13 @@ use temporary state and ephemeral ports.
 - [Evidence and acceptance](EVIDENCE.md)
 
 See the [black-box adapter coverage](HIDDEN_ASSESSMENT.md) for test functions and observed contract results.
+
+### Baseline persisted-state trust boundary
+
+The baseline trusts the SQLite writer and filesystem permissions for device,
+grant and approval rows. The authenticated audit chain verifies recorded
+decisions. It cannot independently attest the current authorization tables.
+An asset's authenticated ciphertext binds its identifier and version, but
+does not establish that it is the newest genuine ciphertext. The revocation
+witness anchors a prior audit checkpoint. Independent current-state comparison
+belongs to the experimental archive workflow.

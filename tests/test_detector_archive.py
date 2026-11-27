@@ -29,7 +29,7 @@ class DetectorArchiveTest(unittest.TestCase):
         for item in result["findings"]:
             event, alert = item["event"], item["receipt"]
             self.assertEqual(alert["state"], "CONFIRMED")
-            self.assertEqual(event["rule_version"], 1)
+            self.assertEqual(event["rule_version"], 1 if event["rule_id"] == "unexpected_allowed_access" else 2)
             for ref in event["source_ids"]:
                 self.assertEqual(ref["producer"], PRODUCER)
                 retained = self.archive.retrieve(self.investigator, **ref)
