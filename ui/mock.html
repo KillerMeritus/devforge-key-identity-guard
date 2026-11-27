@@ -1,117 +1,28 @@
 <!doctype html>
 <html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Security Assurance Lab · DevForge</title>
-<link rel="stylesheet" href="/console.css">
-<main>
-  <header class="masthead">
-    <div class="brand"><span class="brand-mark"></span> DEVFORGE / TRACK 4</div>
-    <nav aria-label="Console sections">
-      <a href="#scenario-lab">Scenarios</a><a href="#recovery">Recovery</a><a href="#evidence-panel">Evidence</a><a href="#operational-monitor">Monitor</a><a href="#intelligence">Detection</a><a href="#archive-lab">Archive</a>
-    </nav>
-  </header>
-
-  <section class="heading">
-    <p class="eyebrow">TWO-NODE SECURE FILE SERVICE</p>
-    <h1>Security Assurance Lab<span>.</span></h1>
-    <p class="muted">Run a security scenario against fresh synthetic state and inspect the worker decisions.</p>
-  </section>
-
-  <section class="panel" id="scenario-lab" aria-labelledby="lab-title">
-    <h2 id="lab-title">Security scenarios</h2>
-    <div class="controls">
-      <label>Scenario<select id="lab-choice">
-        <option value="revocation">Device revocation</option>
-        <option value="approval">Expired and consumed approvals</option>
-        <option value="competing">Competing rotations</option>
-        <option value="pre">Interrupt before commit</option>
-        <option value="post">Interrupt after commit</option>
-        <option value="backup">Damaged backup</option>
-        <option value="quarantine">Stale-state quarantine (experimental)</option>
-        <option value="passport">Evidence Passport verification</option>
-      </select></label>
-      <label>Passport challenge (optional, 64 lowercase hex digits)<input id="lab-challenge" maxlength="64" autocomplete="off"></label>
-      <button class="primary" id="run-lab">Run scenario</button>
-    </div>
-    <dl class="lab-spec">
-      <div><dt>Preconditions</dt><dd id="lab-preconditions"></dd></div>
-      <div><dt>Expected invariant</dt><dd id="lab-expected"></dd></div>
-      <div><dt>Affected nodes</dt><dd id="lab-nodes"></dd></div>
-    </dl>
-    <p id="lab-status" class="status" role="status">NOT TESTED</p>
-    <div id="lab-outcome"></div>
-  </section>
-  <section id="recovery" aria-labelledby="recovery-title">
-    <div class="section-title"><h2 id="recovery-title">Recovery Lab</h2><span class="label stable">BASELINE</span></div>
-    <div class="controls">
-      <label>Crash checkpoint<select id="phase"><option value="pre">Before commit</option><option value="post">After commit</option></select></label>
-      <label>Predict the surviving version<select id="prediction"><option value="1">Version 1</option><option value="2">Version 2</option></select></label>
-      <label>Optional verifier challenge (64 lowercase hex digits)<input id="challenge" maxlength="64" pattern="[0-9a-f]{64}"></label>
-      <button class="primary" id="run">Run recovery test</button>
-    </div>
-    <p id="result" class="status" role="status">Ready to run against fresh synthetic state.</p>
-    <div class="cards" aria-label="Observed outcomes">
-      <div class="card"><span class="eyebrow">NODE A</span><strong id="nodeA">Awaiting test</strong><small id="detailsA"></small></div>
-      <div class="card"><span class="eyebrow">NODE B</span><strong id="nodeB">Awaiting test</strong><small id="detailsB"></small></div>
-      <div class="card"><span class="eyebrow">COMMITTED KEY VERSION</span><strong id="version">—</strong><small id="recovery-time"></small></div>
-    </div>
-  </section>
-
-  <div class="layout">
-    <section class="panel" aria-labelledby="timeline-title">
-      <h2 id="timeline-title">Incident timeline</h2>
-      <div id="timeline"><p class="muted">Run a recovery scenario to see observed events.</p></div>
-    </section>
-    <section class="panel" id="evidence-panel" tabindex="-1">
-      <h2>Evidence Explorer</h2>
-      <p class="muted" id="evidence-summary">Select an event or archived finding.</p>
-      <pre id="evidence" aria-label="Evidence fields"></pre>
-    </section>
-  </div>
-
-  <section class="panel invariant-panel" aria-labelledby="invariant-title">
-    <h2 id="invariant-title">Security invariants</h2>
-    <details><summary>System topology and trust</summary>
-    <p class="topology">Local judge → Scenario harness → Workers A and B → Shared SQLite</p>
-    <p class="topology">Workers → Independent revocation witness · Experimental workers → Separate evidence archive</p>
-    <dl><dt>Baseline workers A and B</dt><dd>Both read the same SQLite authorization rows. The audit chain authenticates recorded decisions.</dd>
-    <dt>Revocation witness</dt><dd>A separate checkpoint anchors revocation history across working-store restores.</dd>
-    <dt>Worker signatures</dt><dd>Each node signs its own historical decision and verifier challenge. Recovery times come from the harness.</dd>
-    <dt>Experimental archive</dt><dd>Confirmed receipts bind source events outside the working snapshot. Detector inputs are organizer-style synthetic observations.</dd></dl></details>
-    <dl class="invariants">
-      <div><dt>Revocation on both nodes</dt><dd id="check-revocation" data-state="pending">PENDING</dd></div>
-      <div><dt>Authorized teammate access</dt><dd id="check-access" data-state="pending">PENDING</dd></div>
-      <div><dt>Audit chain verification</dt><dd id="check-audit" data-state="pending">PENDING</dd></div>
-      <div><dt>Archive snapshot quarantine</dt><dd id="check-archive" data-state="pending">PENDING</dd></div>
-      <div><dt>Detector receipt binding</dt><dd id="check-detector" data-state="pending">PENDING</dd></div>
-    </dl>
-  </section>
-
-  <section class="panel" id="operational-monitor">
-    <div class="section-title"><h2>Operational audit monitor</h2><span class="label stable">BASELINE</span></div>
-    <p>Observe authenticated audit records as the local recovery and approval fixtures run.</p>
-    <button class="secondary" id="run-monitor">Run monitored fixtures</button>
-    <p class="status" id="monitor-status" role="status">NOT TESTED</p>
-    <div id="monitor-events"></div>
-  </section>
-
-  <div class="layout lower">
-    <section class="panel" id="intelligence">
-      <div class="section-title"><h2>Detection View</h2><span class="label">EXPERIMENTAL ARCHIVE</span></div>
-      <p class="muted">Replay synthetic detector inputs and inspect confirmed source receipts.</p>
-      <button class="secondary" id="run-detection">Replay detector evidence</button>
-      <p class="status" id="detection-status" role="status"></p>
-      <div id="detections"></div>
-    </section>
-    <section class="panel" id="archive-lab">
-      <div class="section-title"><h2>Security Time Machine</h2><span class="label">EXPERIMENTAL</span></div>
-      <p class="muted">Restore a stale snapshot, retrieve retained evidence, and restore verified current state.</p>
-      <button class="secondary" id="run-archive">Run archive restore</button>
-      <p class="status" id="archive-status" role="status"></p>
-      <div id="archive-events"></div>
-    </section>
-  </div>
-</main>
-<script src="/console.js" defer></script>
-</html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Recovery Console | Interactive Security Lab</title><link rel="stylesheet" href="/console.css"></head>
+<body>
+<header class="topbar"><div class="brand"><div class="mark" aria-hidden="true">⬡</div><div><strong>RECOVERY<span> / </span>CONSOLE</strong><small>DEVFORGE · SECURITY ASSURANCE LAB</small></div></div><div class="top-status"><span class="dot"></span> Local laboratory <span class="divider"></span> Synthetic fixtures only</div></header>
+<main class="shell">
+<aside class="rail" aria-label="Scenario selector"><div class="rail-title">LAB EXERCISES <span>10</span></div><div id="scenario-list"></div><div class="rail-note"><b>One authority, two workers</b><p>Same-host process recovery. No distributed failover claim.</p></div></aside>
+<div class="workspace">
+<section class="hero"><div><div id="category" class="eyebrow">SYSTEM OVERVIEW</div><h1 id="title">How recovery works</h1><p id="subtitle"></p></div><div id="mode-pill" class="pill neutral" role="status">EXPECTED · NOT TESTED</div></section>
+<section class="toolbar" aria-label="Scenario controls"><div class="mode"><button id="expected" aria-pressed="true">Expected walkthrough</button><button id="observed" aria-pressed="false" disabled>Observed replay</button></div><div class="controls"><label id="prediction-wrap" hidden>Predict version<select id="prediction"><option value="1">v1 · original</option><option value="2">v2 · rotated</option></select></label><details id="challenge-wrap" hidden><summary>Verifier challenge</summary><label>64 lowercase hex digits<input id="challenge" maxlength="64" autocomplete="off" placeholder="Optional · generated if blank"></label></details><button id="run" class="run" disabled>▶ Run actual test</button></div></section>
+<div id="run-status" class="run-status" role="status" aria-live="polite">Select a scenario to run. Explore the architecture without executing anything.</div>
+<section class="metrics" id="metrics" aria-label="Observed outcome summary"></section>
+<div class="work-grid">
+<section class="visual panel"><div class="panel-head"><div><span class="eyebrow">SYSTEM STATE</span><h2 id="diagram-title">Shared authority</h2></div><span id="step-badge" class="pill neutral">STEP 1</span></div>
+<div id="topology" class="topology" aria-label="Animated system state diagram">
+<div class="column actors"><div class="column-label">ACTORS / INPUT</div><div class="node" id="box-owner"><span class="node-icon">◉</span><div><b id="label-owner">Owner device</b><small id="val-owner">Not observed</small></div></div><div class="node" id="box-operator"><span class="node-icon">◇</span><div><b id="label-operator">Operator</b><small id="val-operator">Not observed</small></div></div><div class="node" id="box-peer"><span class="node-icon">◈</span><div><b id="label-peer">Teammate</b><small id="val-peer">Not observed</small></div></div></div>
+<div class="connector" aria-hidden="true"><span></span><span></span></div>
+<div class="column workers"><div class="column-label">EXECUTION</div><div class="node worker" id="box-a"><span class="node-icon">A</span><div><b id="label-a">Worker A</b><small id="val-a">Not observed</small></div></div><div class="node worker" id="box-b"><span class="node-icon">B</span><div><b id="label-b">Worker B</b><small id="val-b">Not observed</small></div></div></div>
+<div class="connector" aria-hidden="true"><span></span><span></span></div>
+<div class="column stores"><div class="column-label">AUTHORITY / EVIDENCE</div><div class="node store" id="box-db"><span class="node-icon">▤</span><div><b id="label-db">Shared SQLite</b><small id="val-db">Not observed</small></div></div><div class="node store" id="box-witness"><span class="node-icon">⌁</span><div><b id="label-witness">Revocation witness</b><small id="val-witness">Not observed</small></div></div><div class="node store" id="box-audit"><span class="node-icon">▣</span><div><b id="label-audit">Audit / evidence</b><small id="val-audit">Not observed</small></div></div></div>
+</div><div class="legend"><span><i class="good"></i> Allowed / verified</span><span><i class="deny"></i> Denied</span><span><i class="warn"></i> Transition / investigate</span><span><i class="neutral"></i> Unknown / unavailable</span></div>
+<div class="step-story"><div id="step-source" class="eyebrow">EXPECTED MODEL</div><h2 id="step-title"></h2><p id="step-description"></p></div>
+<div class="transport"><button id="prev" title="Previous step">◀</button><button id="play">▶ Play</button><button id="next" title="Next step">▶</button><input id="scrub" type="range" min="0" max="0" value="0" aria-label="Replay step"><span id="step-count">1 / 1</span><button id="reset">↺</button></div></section>
+<aside class="panel inspector" aria-label="Evidence inspector"><div class="panel-head"><div><span class="eyebrow">PROVENANCE</span><h2>Evidence inspector</h2></div><span id="evidence-type" class="pill neutral">EXPECTED</span></div><div id="evidence-summary" class="evidence-summary"></div><div id="evidence-fields" class="fields"></div><details id="raw-wrap"><summary>Original record / JSON</summary><pre id="raw"></pre></details><details id="run-wrap" hidden><summary>Complete returned report</summary><pre id="report"></pre></details></aside>
+</div>
+<section class="panel trail"><div class="panel-head"><div><span class="eyebrow">EXECUTION TRAIL</span><h2 id="trail-title">Expected sequence</h2></div><span id="trail-note" class="muted">Illustration, not measurement</span></div><div id="timeline" class="timeline"></div></section>
+<footer>Expected walkthroughs are illustrative. Observed replay uses actual completed fixture responses. Only the operational monitor streams observations during execution.</footer>
+</div></main><script src="/console.js" defer></script></body></html>

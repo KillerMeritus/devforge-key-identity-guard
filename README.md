@@ -166,26 +166,60 @@ python console.py
 
 Run this from the directory containing your checkout, or use its absolute path.
 
-## Try the demo
+## Try the visual simulator
 
-Start with the **Recovery Lab**. Predict the surviving version, run the scenario,
-then inspect the actual evidence.
+The console opens in **System overview**. Use the left-hand scenario selector
+to switch workspaces. There is no scroll-link navbar.
 
-| Try this | Expected outcome |
-|---|---|
-| Before commit | v1 survives the process kill |
-| After commit | v2 survives; new v1 requests are rejected |
-| Device revocation | Both workers deny the revoked device; teammate access remains |
-| Expired or consumed approvals | Invalid approval rejected |
-| Competing rotations | One eligible rotation commits |
-| Damaged backup | Original accepted; damaged copy rejected |
-| Evidence Passport | Original historical statements authenticate; modified copy rejected |
-| Operational audit monitor | Authenticated findings and observed denial containment |
-| Detection View | Synthetic contextual findings and clock uncertainty |
-| Security Time Machine (experimental) | Stale state quarantined; eligible current snapshot restored |
+1. Choose a scenario, or stay in System overview to learn the architecture.
+2. In **Expected walkthrough**, use Previous, Next, Play or the timeline slider
+   to explore the illustrated sequence. No backend test is executed.
+3. For an executable scenario, click **Run actual test**.
+4. Inspect **Observed replay**: the diagram, outcome cards, execution trail and
+   evidence inspector use the returned fixture observations.
+5. Click a trail entry to inspect its source and original record. Expand
+   **Complete returned report** for the full response.
 
-HTTP 200 = allowed. HTTP 403 = explicit denial. HTTP 503 = unavailable / fail closed.
-The baseline Recovery Lab is the recommended judging path.
+Only the Operational monitor streams during execution. Other scenarios return
+completed results and animate a replay afterward. Expected walkthroughs never
+count as measured evidence. Results are held in the current browser session;
+reloading the page clears them. Each run creates a new synthetic fixture.
+
+### Scenario selector
+
+| Scenario | What the actual test orchestrates | What to look for |
+| --- | --- | --- |
+| System overview | No execution; educational architecture only | Device credentials, operator, two workers, shared SQLite, witness and audit. |
+| Crash before commit | Stages rotation, terminates worker A before commit and restarts it | v1 survives; revoked device denied; teammate reads on both workers. |
+| Crash after commit | Commits rotation, terminates A before response and restarts it | v2 survives; v1 denied; revocation preserved; recovery timing from harness. |
+| Device revocation | Post-commit recovery fixture including revocation, replacement enrollment and rotation | Both revoked-device denials 403; teammate access 200; historical statements. |
+| Approval lifecycle | Expired approval rejected, valid approval consumed once, reuse rejected | 403 approval_expired, 200 version_rotated, 403 approval_missing; both workers read v2. |
+| Competing rotations | Two valid v1 approvals submitted concurrently to A and B | One 200 version_rotated and one 403 wrong_version. Either worker may win. |
+| Damaged backup | Verifies encrypted active-version key backup and modified copy | Original accepted; damaged copy rejected. Not whole-store recovery. |
+| Evidence Passport | Verifies historical ML-DSA-65 worker statements, modified copies and fixed claims | Original authenticated, modified rejected, policy claims appraised; expand actual records. |
+| Operational monitor | Streams observations from separate recovery and approval fixtures | Authenticated audit findings, matched HTTP denials, containment and coverage status. No autonomous revocation. |
+| Contextual detection | Bounded synthetic service-event replay with archived source evidence | Rule findings, source receipts, timing uncertainty; not live service traffic. |
+| Security Time Machine | Experimental stale snapshot quarantine and verified-current restoration | Both stale reads 503, retained historical receipt CONFIRMED, restored teammate 200 and revoked device 403. |
+
+### Recovery and challenge controls
+
+- For **Crash before commit**, predict **v1**. For **Crash after commit**, predict
+  **v2**. The prediction is an expectation, never an input to the database.
+- For recovery and Passport scenarios, optionally expand **Verifier challenge**.
+  Leave it blank to let the harness generate challenges, or paste exactly 64
+  lowercase hexadecimal digits generated with:
+
+  ```bash
+  python -c 'import secrets; print(secrets.token_hex(32))'
+  ```
+
+- Green indicates allowed/verified, red indicates denial, amber indicates a
+  transition or investigative finding, and neutral indicates unknown or
+  unavailable. The accompanying text is authoritative.
+- HTTP 200 = successful operation; 401 = authentication failure; 403 = explicit
+  denial; 503 = fail-closed unavailability. A denial can be the expected result
+  of a successful security test. Do not interpret a 503 as a verified
+  revocation denial.
 
 <details>
 <summary><b>Run without a browser</b></summary>
@@ -200,43 +234,6 @@ The first two commands finish with PASS and recovered v1 and v2 respectively.
 Add `--json` to export recovery results.
 
 </details>
-
-### Scenario playbook (what each button actually runs)
-
-All runs use fresh synthetic fixtures. The dropdown is a scenario selector, not a live file editor. You do not enter real credentials, approval IDs or file contents. The only editable verification input is an optional 64-character lowercase hexadecimal challenge.
-
-| Security scenarios option | Orchestration | What to inspect |
-| --- | --- | --- |
-| Device revocation | Runs the post-commit recovery harness, including revocation, replacement credential enrollment, rotation and restart. | Expand Node A and B: `denial_status: 403`, `denial_reason: revoked_device`, `teammate_status: 200`, signed statement. |
-| Expired and consumed approvals | Both workers read v1; A attempts expired approval, A rotates with valid approval, B attempts reuse. | Before and After records; outcomes 403 `approval_expired`, 200 `version_rotated`, 403 `approval_missing`. Both workers deny v1 and read exact v2 contents. |
-| Competing rotations | Two valid approvals for v1 are submitted concurrently to A and B. | Exactly one 200 `version_rotated` and one 403 `wrong_version`; either worker may win. Both subsequently read v2 and reject v1. |
-| Interrupt before commit | Real worker A termination before rotation transaction commit; restart A. | Before, After and Supporting decisions: v1 survives; both workers deny revoked device and allow teammate. |
-| Interrupt after commit | Commit rotation, pause before response, terminate and restart A. | v2 survives; v1 rejected; teammate can read; revoked device denied. |
-| Damaged backup | Post-commit harness verifies intact encrypted key backup and a one-byte-modified copy. | `intact_accepted: true`, `damaged_accepted: false`, associated backup evidence. This is key-backup verification, not whole-store recovery. |
-| Stale-state quarantine (experimental) | Revokes owner, captures snapshot, records later denied read, reinstalls older snapshot; retrieves retained receipt; restores verified current snapshot. | Both stale reads 503; historical receipt CONFIRMED; restored teammate 200 and revoked device 403. |
-| Evidence Passport verification | Post-commit harness signs historical decisions using per-node ML-DSA-65 keys; verifies originals and rejects modified signed versions. | Expand each node's original and modified statement, pinned public key and policy appraisal. Three historical claims VERIFIED. |
-
-**How to run:** choose the exact option, inspect Preconditions / Expected invariant / Affected nodes, then click **Run scenario**. Expand the result rows. For Passport only, leave challenge blank for generated challenges or supply your own (generate one with `python -c 'import secrets; print(secrets.token_hex(32))'`). Other dropdown options disable the challenge field.
-
-### Other console sections
-
-| Section | Control and interpretation |
-| --- | --- |
-| Recovery Lab | Choose Before commit + Version 1, or After commit + Version 2. Optional verifier challenge as above. Click Run recovery test. The prediction is an expectation, never a control over the database. |
-| Incident timeline / Evidence Explorer | After recovery, click a timeline event to inspect request ID, audit identity, action, decision and reason when available. Harness-only observations are not worker-signed evidence. Click the PASS buttons for revocation, access and audit to inspect their evidence. |
-| Operational audit monitor | Click Run monitored fixtures. Runs separate post-commit recovery and approval fixtures, streaming authenticated findings, matching HTTP denials and separately scripted operator revocation. Expand findings and final poll report. No autonomous revocation. |
-| Detection View | Click Replay detector evidence. Runs a bounded synthetic service-event replay, not live worker traffic. Click Violation, Investigate or Timing rows to inspect source observations, receipts, explanations and uncertainty. |
-| Security Time Machine | Click Run archive restore. Click stale read, historical receipt and recovered-node rows to inspect the evidence. The independent archive survives the working-store snapshot restore. |
-
-**Navigation:** Scenarios, Recovery, Evidence, Monitor, Detection and Archive are
-in-page anchor links. They scroll to sections of the same console rather than
-open separate pages. Results stay visible until replaced or the page is reloaded.
-
-**Status legend:** PASS means the fixture assertions succeeded; FAIL means an
-assertion failed; UNAVAILABLE means execution or evidence could not be verified;
-NOT TESTED means no completed test for that selection. A wrong prediction does
-not change the actual recovery outcome. Measurements vary across runs.
-
 
 ## Architecture
 
@@ -313,8 +310,10 @@ PYTHONPATH=. python scripts/smoke_archive_ops.py
 The frozen engineering release
 [`27d5a8b4ce45ce5666cd1134a6f12fe4d445e524`](https://github.com/KillerMeritus/devforge-key-identity-guard/commit/27d5a8b4ce45ce5666cd1134a6f12fe4d445e524)
 reported 96 application tests, seven reviewer regressions and 22 organizer
-checks passing in the pinned runtime. This README clarification does not
-change the application code or imply a fresh test run.
+checks passing in the pinned runtime. The visual simulator changes only frontend presentation and browser-test code;
+the frozen measurements remain attributed to the engineering revision.
+The updated UI passed in-memory mock-response browser tests, but a full
+real-backend browser run in the pinned runtime is still required.
 
 For the organizer practice detector replay (after step 4):
 
@@ -557,9 +556,9 @@ python demo_cli.py --kill-at post --json
 python console.py
 ```
 
-Open `http://127.0.0.1:8080`. Start in **Recovery Lab**. Select a crash
-checkpoint, predict a version, run it, and open a verified event in the
-Evidence Explorer. The browser's Detection View uses a bounded synthetic
+Open `http://127.0.0.1:8080`. Select **Crash before commit** or **Crash after commit** in the sidebar,
+predict a version, run the actual test, and open a returned record in the
+Evidence inspector. Contextual detection uses a bounded synthetic
 replay and a disposable independent evidence archive. Security Time Machine
 uses a separate disposable archive-mode working store. It demonstrates
 stale-snapshot quarantine and restoration from a verified current snapshot.

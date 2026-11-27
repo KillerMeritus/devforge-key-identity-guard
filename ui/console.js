@@ -1,294 +1,73 @@
-const byId = id => document.getElementById(id);
-const text = (id, value) => { byId(id).textContent = value; };
-const state = (id, value) => {
-  byId('check-' + id).dataset.state = value.toLowerCase();
-  text('check-' + id, value);
+'use strict';
+// This file only presents existing fixture responses. Expected models never
+// count as executed tests. Batch endpoints return completed observations;
+// only /run/monitor streams data while the fixture is running.
+const $ = id => document.getElementById(id);
+const set = (id, value) => { $(id).textContent = value; };
+const keys = ['owner','operator','peer','a','b','db','witness','audit'];
+const pair = (label, tone='neutral') => [label,tone];
+const ok = label => pair(label,'good'), deny = label => pair(label,'deny'), warn = label => pair(label,'warn');
+const nodes = ['A','B'];
+const human = x => String(x ?? 'Not supplied').replaceAll('_',' ');
+const step = (title, description, patch={}, evidence=null, source='EXPECTED MODEL') => ({title,description,patch,evidence,source});
+const catalog = {
+ overview:{name:'System overview',sub:'Explore the architecture',category:'SYSTEM OVERVIEW',title:'How recovery works',description:'Explore the actors, shared authority and evidence without executing a scenario.',route:null,steps:[
+ step('One file, two independent workers','The owner and teammate use device credentials. Both workers consult the same transactional database. This is a local model, not a running fixture.',{owner:pair('Device credential'),operator:pair('Administrative role'),peer:pair('Granted reader'),a:pair('Local worker'),b:pair('Local worker'),db:pair('Shared file + grants'),witness:pair('Outside working snapshot'),audit:pair('Authenticated history')}),
+ step('Authorize at the shared authority','The service checks credentials, grants and version before returning protected bytes. Revocation is shared state, not a simulated message broadcast.',{db:pair('Authorization + active version'),audit:pair('Decision recorded')}),
+ step('Rotate atomically','A matching single-use approval permits a rotation. Ciphertext, version, approval consumption and audit entry commit together.',{operator:pair('Scoped approval'),db:warn('Atomic transaction')}),
+ step('Verify independently','The witness anchors revocation history. Worker signatures authenticate historical decisions; the experimental archive compares current state with retained receipts.',{witness:pair('Revocation checkpoint'),audit:pair('Historical evidence')})]},
+ pre:{name:'Crash before commit',sub:'Rollback to v1',category:'BASELINE / RECOVERY',title:'Interrupt before COMMIT',description:'What survives if Worker A dies while the transaction is still uncommitted?',route:'pre',predict:true,challenge:true},
+ post:{name:'Crash after commit',sub:'Durable v2',category:'BASELINE / RECOVERY',title:'Interrupt after COMMIT',description:'What survives if Worker A dies after committing but before replying?',route:'post',predict:true,challenge:true},
+ revocation:{name:'Device revocation',sub:'Deny lost credentials',category:'BASELINE / IDENTITY',title:'Revoke a lost device',description:'The post-commit recovery fixture also checks the replacement credential and retained access.',route:'lab/revocation',steps:[step('Fresh device identities','Owner and teammate begin with separate granted credentials.',{owner:pair('Granted credential'),peer:pair('Granted credential'),db:pair('v1 fixture')}),step('Revoke the owner device','An authorized operator records revocation in the shared database and advances the witness.',{operator:pair('Revoke operation'),owner:deny('Expected revoked'),witness:pair('Checkpoint advanced')}),step('Check both workers after recovery','Both must explicitly deny the old credential; teammate access must still succeed.',{a:deny('Expected owner 403'),b:deny('Expected owner 403'),peer:ok('Expected 200'),db:pair('Expected v2')})]},
+ approval:{name:'Approval lifecycle',sub:'Expire · consume · reject',category:'BASELINE / AUTHORIZATION',title:'Expired and consumed approvals',description:'An approval is scoped, expiring and single use. Compare both workers before and after.',route:'lab/approval'},
+ competing:{name:'Competing rotations',sub:'One commit wins',category:'BASELINE / CONCURRENCY',title:'Two approvals, one transition',description:'Two requests target v1 concurrently. The identity of the winning worker is not predetermined.',route:'lab/competing'},
+ backup:{name:'Damaged backup',sub:'Authenticate key material',category:'BASELINE / BACKUP',title:'Detect a modified key backup',description:'Verify the original encrypted key backup and reject the modified copy. Not whole-store restoration.',route:'lab/backup',steps:[step('Create an authenticated key backup','The post-commit fixture wraps active-version key material using the backup key.',{db:pair('Expected v2'),audit:pair('Encrypted key backup')}),step('Verify the original','The asset and version binding must match.',{a:ok('Expected original accepted'),audit:pair('Verification record')}),step('Change one byte and recheck','Authentication must reject the damaged copy without disrupting authorized access.',{a:deny('Expected damaged rejection'),peer:ok('Expected read continuity'),audit:pair('Rejection record')})]},
+ passport:{name:'Evidence Passport',sub:'Authenticate signed claims',category:'BASELINE / CRYPTOGRAPHY',title:'Verify the Evidence Passport',description:'Verify historical worker statements using separately provisioned ML-DSA-65 public keys.',route:'lab/passport',challenge:true,steps:[step('Pin both public keys','Each worker has a different signing key. Trust is established outside the evidence envelope.',{owner:pair('Original statement'),operator:pair('Pinned public keys'),peer:pair('Verifier challenge'),a:pair('Signer A'),b:pair('Signer B'),db:pair('Historical audit'),witness:pair('Expected bindings'),audit:pair('Signed bytes')}),step('Authenticate the original statements','Verify the signature, node, challenge and request binding.',{a:ok('Expected authenticated'),b:ok('Expected authenticated'),audit:pair('Original envelopes')}),step('Reject a modified copy','A changed signed version with the original signature must fail verification.',{owner:deny('Expected modified rejection'),audit:pair('Original signature unchanged')}),step('Appraise three historical claims','Both workers must satisfy the expected credential, asset, version and decision constraints.',{db:ok('Expected policy appraisal'),witness:pair('Not current-state proof')})]},
+ monitor:{name:'Operational monitor',sub:'Live authenticated findings',category:'BASELINE / OBSERVATION',title:'Watch real audit observations',description:'Streams observations from separate controlled recovery and approval fixtures.',route:'monitor',steps:[step('Start bounded observation','The observer reads authenticated audit records at fixture checkpoints.',{a:pair('Fixture worker A'),b:pair('Fixture worker B'),audit:pair('Verified audit snapshot')}),step('Correlate actual denials','The monitor associates an audit decision with an HTTP denial that withheld protected fields.',{audit:pair('Request ID correlation'),owner:pair('Denied request')}),step('Report findings and coverage','Containment evidence and scripted operator actions are separate. Incomplete observation is UNAVAILABLE.',{operator:pair('Explicit scripted action'),witness:pair('Coverage and poll budget')})]},
+ detection:{name:'Contextual detection',sub:'Synthetic service replay',category:'EXPERIMENTAL / DETECTOR',title:'Explain suspicious service activity',description:'Replay synthetic service observations and inspect policy, correlation and clock uncertainty.',route:'detection',steps:[step('Retain source observations','Canonical synthetic event records are written to the independent evidence archive.',{owner:pair('Synthetic actor'),operator:pair('Approval policy'),peer:pair('Source events'),a:pair('Source ingestion'),b:pair('Detector'),db:pair('Corrected event times'),witness:pair('Source receipts'),audit:pair('Evidence archive')}),step('Evaluate context','Scope, corrected time, correlation and service edges determine findings. Uncertainty is not a proven violation.',{b:warn('Evaluate rules'),db:pair('Timing uncertainty')}),step('Bind findings to source receipts','The archive retains derived alerts and their source references.',{witness:pair('Source sequence'),audit:pair('Derived receipt')})]},
+ quarantine:{name:'Security Time Machine',sub:'Stale-state quarantine',category:'EXPERIMENTAL / ARCHIVE',title:'Recover eligible encrypted state',description:'Restore a stale working snapshot, retrieve retained evidence, then restore the current eligible snapshot.',route:'archive',steps:[step('Retain history outside the snapshot','The fixture revokes the owner, saves an older snapshot, and records a later denied read.',{owner:pair('Revocation recorded'),db:pair('Older snapshot'),witness:pair('Surviving checkpoint'),audit:pair('Independent archive')}),step('Install the stale snapshot','Both workers must withhold access because the working state no longer matches the retained evidence.',{a:warn('Expected 503'),b:warn('Expected 503'),db:warn('Stale / quarantined')}),step('Retrieve retained historical evidence','A separately scoped investigator can retrieve the confirmed earlier decision.',{operator:pair('Investigator credential'),audit:ok('Expected confirmed receipt')}),step('Restore current eligible snapshot','Both workers must allow teammate reads and still deny the revoked device.',{a:ok('Expected teammate 200'),b:ok('Expected teammate 200'),owner:deny('Expected revoked 403'),db:pair('Eligible state')})]}
 };
-const measured = (id, condition) => state(id, condition ? 'PASS' : 'FAIL');
-const allNodes = ['A', 'B'];
-const runControls = () => ['run', 'run-detection', 'run-archive', 'run-lab', 'run-monitor'].map(byId);
-let active = false;
-
-function showEvidence(summary, evidence) {
-  text('evidence-summary', summary);
-  text('evidence', JSON.stringify(evidence, null, 2));
-}
-
-function row(parent, source, title, action) {
-  const button = document.createElement('button');
-  button.className = 'event';
-  const badge = document.createElement('span');
-  badge.textContent = source;
-  const name = document.createElement('span');
-  name.textContent = title;
-  button.append(badge, name);
-  button.addEventListener('click', () => {
-    action();
-    if (parent !== 'timeline') byId('evidence-panel').focus();
-  });
-  byId(parent).append(button);
-}
-
-async function runScenario(route, statusId, checks, render, challenge) {
-  if (active) return;
-  active = true;
-  const controls = runControls();
-  controls.forEach(button => { button.disabled = true; });
-  checks.forEach(check => state(check, 'PENDING'));
-  text(statusId, 'Running the local scenario…');
-  try {
-    const response = await fetch('/run/' + route, {
-      method: 'POST', headers: {'X-Recovery-Console': 'run', ...(challenge ? {'X-Verification-Challenge': challenge} : {})}
-    });
-    const result = await response.json();
-    if (!response.ok) {
-      const error = new Error(response.status === 400 ? 'Use a 64-digit lowercase hexadecimal challenge.' : result.error);
-      error.invalidInput = response.status === 400;
-      error.verificationFailed = result.verification_failed === true;
-      throw error;
-    }
-    render(result);
-  } catch (error) {
-    checks.forEach(check => state(check, 'UNAVAILABLE'));
-    if (error.verificationFailed) {
-      text(statusId, 'FAIL · ' + error.message);
-    } else {
-      text(statusId, (error.invalidInput ? 'NOT TESTED' : 'UNAVAILABLE') + ' · ' + error.message);
-    }
-    if (checks.includes('revocation')) {
-      allNodes.forEach(node => text('node' + node, 'Unavailable'));
-    }
-  } finally {
-    controls.forEach(button => { button.disabled = false; });
-    active = false;
-  }
-}
-
-byId('run').addEventListener('click', () => {
-  if (active) return;
-  const prediction = Number(byId('prediction').value);
-  const phase = byId('phase').value;
-  byId('timeline').replaceChildren();
-  showEvidence('Awaiting observed events.', null);
-  text('version', '—');
-  text('recovery-time', '');
-  allNodes.forEach(node => {
-    text('node' + node, 'Running');
-    text('details' + node, '');
-  });
-  runScenario(phase, 'result', ['revocation', 'access', 'audit'], result => {
-    text('version', 'v' + result.active_version);
-    text('recovery-time', result.recovery_ms + ' ms to first verified read on Node A');
-    const nodes = result.nodes;
-    allNodes.forEach(node => {
-      const observation = nodes[node];
-      const denied = observation.revoked_status === 403 && observation.revoked_reason === 'revoked_device';
-      text('node' + node, observation.health === 200 && denied ? 'Revocation verified' : 'See observed result');
-      const old = result.cutoff[node];
-      text('details' + node, 'Health ' + observation.health + ' · Teammate ' +
-        observation.teammate_status + ' · Revoked device ' + observation.revoked_status +
-        (old ? ' · v' + old.requested_version + ' rejected with HTTP ' + old.status +
-          ' in ' + old.observed_ms + ' ms' : ''));
-    });
-    measured('revocation', allNodes.every(node =>
-      nodes[node].revoked_status === 403 && nodes[node].revoked_reason === 'revoked_device'));
-    measured('access', allNodes.every(node => nodes[node].teammate_status === 200));
-    measured('audit', result.audit_verified === true);
-    for (const [id, details] of Object.entries({revocation: nodes, access: nodes, audit: result.evidence})) {
-      const button = document.createElement('button');
-      button.textContent = byId('check-' + id).textContent;
-      button.onclick = () => showEvidence(
-        id === 'audit' ? 'Authenticated audit history' : 'Harness observations and signed worker decisions',
-        details
-      );
-      byId('check-' + id).replaceChildren(button);
-    }
-    const prefix = prediction === result.active_version ? 'Prediction verified.' : 'Prediction differed.';
-    text('result', prefix + ' Predicted v' + prediction + ', observed v' + result.active_version +
-      '. Last denial ' + result.last_denial_ms + ' ms after revoke commit.');
-    const evidence = new Map(result.evidence.map(event => [event.request_id, event]));
-    for (const event of result.timeline) {
-      const audit = evidence.get(event.request_id);
-      row('timeline', event.source, event.label, () => showEvidence(event.label, audit ? {
-        ...event, audit: result.audit_verified ? 'verified' : 'unverified',
-        event_id: audit.id, actor: audit.actor, action: audit.action, decision: audit.decision,
-        reason: audit.reason, timestamp: audit.timestamp
-      } : event));
-    }
-  }, byId('challenge').value);
-});
-
-byId('run-detection').addEventListener('click', () => {
-  if (active) return;
-  byId('detections').replaceChildren();
-  runScenario('detection', 'detection-status', ['detector'], result => {
-    text('detection-status', result.findings.length + ' findings · ' + result.timing_notes.length +
-      ' timing notes · ' + result.source_ingestion.median_ms + ' ms median source ingestion');
-    const sources = new Map(result.sources.map(source => [source.event_id, source]));
-    if (result.findings.length) {
-      measured('detector', result.findings.every(item => item.receipt.state === 'CONFIRMED' &&
-        item.event.source_ids.every(ref => {
-          const source = result.source_receipts[ref.event_id];
-          return source?.state === 'CONFIRMED' && source.producer === ref.producer &&
-            source.sequence < item.receipt.sequence;
-        })));
-    }
-    for (const item of result.findings) {
-      const kind = item.event.detector_context.classification === 'policy_violation' ? 'Violation' : 'Investigate';
-      row('detections', kind, item.event.actor + ' · ' + item.event.rule_id.replaceAll('_', ' '), () =>
-        showEvidence(item.event.rule_id.replaceAll('_', ' '), {
-          ...item.event, explanation: item.explanation, services: item.services,
-          service_edges: item.service_edges, uncertainty_ms: item.uncertainty_ms, receipt: item.receipt,
-          sources: item.event.source_ids.map(ref => ({ ...ref, observation: sources.get(ref.event_id), receipt: result.source_receipts[ref.event_id] }))
-        }));
-    }
-    for (const note of result.timing_notes) {
-      row('detections', 'Timing', note.reason.replaceAll('_', ' '), () =>
-        showEvidence('Timing uncertainty', { ...note, observation: sources.get(note.event) }));
-    }
-  });
-});
-
-byId('run-archive').addEventListener('click', () => {
-  if (active) return;
-  byId('archive-events').replaceChildren();
-  runScenario('archive', 'archive-status', ['archive'], result => {
-    measured('archive', allNodes.every(node => result.quarantine[node].status === 503));
-    text('archive-status', 'Current snapshot verified · ' + result.recovery_ms + ' ms through both node checks');
-    for (const node of allNodes) {
-      const blocked = result.quarantine[node];
-      row('archive-events', 'Node ' + node, 'Stale read → HTTP ' + blocked.status,
-        () => showEvidence('Stale snapshot quarantine', blocked));
-    }
-    row('archive-events', 'Archive', 'Historical receipt · ' + result.historical.lifecycle,
-      () => showEvidence('Independently retained historical event', result.historical));
-    for (const node of allNodes) {
-      const recovered = result.recovered[node];
-      row('archive-events', 'Node ' + node, 'Recovered · teammate ' + recovered.teammate.status +
-        ' · revoked ' + recovered.revoked.status, () => showEvidence('Verified current snapshot', recovered));
-    }
-  });
-});
-
-const labSpecs = {
-  revocation: ['Two granted devices before revocation.', 'Both workers explicitly deny the revoked device and serve the teammate.', 'A and B'],
-  approval: ['Version 1, one expired and one active approval.', 'An expired approval fails, an active approval rotates once, and reuse fails.', 'A and B'],
-  competing: ['Version 1 and two approvals bound to that version.', 'Exactly one competing rotation commits. Both workers serve v2 and reject v1.', 'A and B'],
-  pre: ['Version 1 and a rotation paused before commit.', 'After terminating and restarting A, both nodes retain v1 and preserve revocation.', 'A restarted, B observed'],
-  post: ['Version 1 and a rotation paused after commit.', 'After terminating and restarting A, both nodes serve v2 and reject v1.', 'A restarted, B observed'],
-  backup: ['Authenticated backup of the committed key version and a one-byte changed copy.', 'Accept the original backup and reject the damaged copy.', 'Node A verification'],
-  quarantine: ['Experimental archive fixture restored to a stale working snapshot.', 'Both nodes deny access while stale and preserve revocation after verified restore.', 'A and B · experimental'],
-  passport: ['Two worker statements and public keys provisioned independently of the envelopes.', 'Authenticate each original statement and reject a copy with a changed signed version.', 'A and B']
+function recoveryPreview(post){return [step('Start with version 1','A synthetic file, operator and two granted readers are provisioned. Both workers use the same authority.',{owner:pair('Granted'),operator:pair('Admin'),peer:pair('Granted'),a:pair('Worker A'),b:pair('Worker B'),db:pair('v1 committed'),witness:pair('Separate checkpoint'),audit:pair('Audit chain')}),step('Revoke the old credential','Revocation precedes the rotation. Both workers should deny the revoked device.',{owner:deny('Expected revoked'),witness:pair('Revocation recorded'),peer:pair('Still granted')}),step('Prepare new ciphertext','Worker A prepares v2 outside the write transaction. The committed version remains v1.',{a:warn('Preparing v2'),b:ok('Expected v1 reads'),db:pair('v1 committed')}),step(post?'Commit before interruption':'Pause before commit',post?'The transaction commits v2, consumes the approval and records rotation before any reply.':'Writes are staged but not committed. v1 remains the durable version.',{a:warn(post?'Committed; reply pending':'Transaction staged'),db:pair(post?'Expected v2 committed':'v1 committed; v2 staged',post?'good':'warn')}),step('Terminate Worker A','The harness uses real SIGKILL in the executed fixture. Unavailability is not a policy denial.',{a:pair('Expected unavailable'),audit:pair('Harness checkpoint')}),step('Restart and verify both workers',post?'Expected: v2 survives, v1 is denied, teammate reads v2 and the revoked credential remains denied.':'Expected: uncommitted writes roll back; v1 survives and earlier revocation remains durable.',{a:ok('Expected recovered'),b:ok('Expected recovered'),db:ok(post?'Expected v2':'Expected v1'),owner:deny('Expected 403'),peer:ok('Expected 200'),audit:pair(post?'One rotation record':'No committed rotation')})]}
+catalog.pre.steps=recoveryPreview(false);catalog.post.steps=recoveryPreview(true);
+function approvalPreview(competing){return [step('Establish v1','Both workers must read the exact fixture contents using the teammate credential.',{peer:pair('Granted reader'),db:pair('v1 committed'),a:ok('Expected v1 read'),b:ok('Expected v1 read')}),step(competing?'Submit two competing approvals':'Submit an expired approval',competing?'Both requests target the same original version. One can win; the other must fail.':'The operator submits an already expired approval, then an eligible one.',{operator:warn(competing?'Two valid approvals':'Expired + valid approval'),a:warn('Rotation request'),b:warn(competing?'Rotation request':'Await reuse test')}),step('Check the outcome',competing?'Exactly one eligible rotation commits; the winner is not fixed.':'The valid approval is consumed once; the next use must fail.',{db:ok('Expected v2 committed'),audit:pair('Expected recorded decisions')}),step('Read v2; reject v1','Both workers should serve the unchanged file at v2 and reject v1.',{a:ok('Expected v2 / v1 denied'),b:ok('Expected v2 / v1 denied')})]}
+catalog.approval.steps=approvalPreview(false);catalog.competing.steps=approvalPreview(true);
+const labels={owner:'Owner device',operator:'Operator',peer:'Teammate',a:'Worker A',b:'Worker B',db:'Shared SQLite',witness:'Revocation witness',audit:'Audit / evidence'};
+const alternate={passport:{owner:'Original envelope',operator:'Trust pins',peer:'Verifier challenge',a:'Signer A',b:'Signer B',db:'Claim appraisal',witness:'Expected bindings',audit:'Signed evidence'},detection:{owner:'Synthetic actor',operator:'Approval policy',peer:'Source events',a:'Source ingestion',b:'Rule engine',db:'Corrected time',witness:'Source receipts',audit:'Derived alert archive'},backup:{owner:'Original backup',operator:'Backup verifier',peer:'Teammate',a:'Worker A',b:'Worker B',db:'Active version',witness:'Asset / version binding',audit:'Backup verification'},quarantine:{operator:'Investigator / operator',db:'Working snapshot',witness:'Independent witness',audit:'Independent archive'}};
+let selected='overview', view='expected', observed=[], report=null, index=0, busy=false, outcome='NOT TESTED', timer=null;
+const sessionRuns=new Map();
+const current=()=>view==='expected'?catalog[selected].steps:observed;
+function stop(){clearInterval(timer);timer=null;set('play','▶ Play')}
+function pill(id,label,tone='neutral'){$(id).className='pill '+tone;set(id,label)}
+function metrics(items){$('metrics').replaceChildren();for(const [label,value,tone] of items){const el=document.createElement('div');el.className='metric';const a=document.createElement('span'),b=document.createElement('strong');a.textContent=label;b.textContent=value;if(tone)b.classList.add('tone-'+tone);el.append(a,b);$('metrics').append(el)}}
+function evidenceFields(st){const raw=st.evidence;set('evidence-summary',raw==null?(view==='expected'?'Expected behavior only. Run the actual test to obtain evidence.':'No separate evidence record was returned for this step.'):st.source==='HARNESS'?'Harness observation. Not a worker-signed statement.':'Returned evidence for this observation. Open JSON for the full record.');pill('evidence-type',view==='expected'?'EXPECTED':st.source,view==='expected'?'neutral':st.source==='HARNESS'?'warn':'neutral');$('evidence-fields').replaceChildren();$('raw-wrap').hidden=raw==null;set('raw',raw==null?'':JSON.stringify(raw,null,2));if(raw==null)return;const event=raw.audit_event??raw.event??raw.statement?.event??raw.observation??raw;const fieldList=['node','actor','credential_ref','action','decision','reason','target','version','requested_version','status','request_id','id','rule','rule_id','classification','containment','lifecycle','challenge','sequence','original','modified','intact_accepted','damaged_accepted','elapsed_ms','recovery_ms','teammate_status','revoked_status','revoked_reason','old_version_status','denial_status','denial_reason','health','audit_verified','active_version','predicted_version','revoked-device','teammate-read','retired-version'];for(const k of fieldList){const v=event[k]??raw[k];if(v===undefined||v===null||typeof v==='object')continue;const row=document.createElement('div');row.className='field';const a=document.createElement('span'),b=document.createElement('strong');a.textContent=human(k);b.textContent=String(v);row.append(a,b);$('evidence-fields').append(row)} if(raw.event?.detector_context){const row=document.createElement('div');row.className='field';const a=document.createElement('span'),b=document.createElement('strong');a.textContent='classification';b.textContent=human(raw.event.detector_context.classification);row.append(a,b);$('evidence-fields').append(row)} }
+function render(animate=false){const list=current();if(!list.length){$('timeline').replaceChildren();for(const k of keys){set('val-'+k,'Not observed');$('box-'+k).className='node neutral'}set('step-title',busy?'Executing real fixture':'No completed observations');set('step-description',busy?'Waiting for actual backend observations. No result is assumed.':'Run the fixture to obtain a replay.');set('step-source','OBSERVED MODE');pill('step-badge','AWAITING OBSERVATIONS');set('step-count','0 / 0');$('scrub').max='0';$('scrub').value='0';for(const id of ['prev','next','play','reset','scrub'])$(id).disabled=true;evidenceFields(step('','',{},null,'NO RECORD'));return}index=Math.max(0,Math.min(index,list.length-1));const st=list[index], values={};for(let i=0;i<=index;i++)Object.assign(values,list[i].patch);for(const k of keys){set('label-'+k,alternate[selected]?.[k]??labels[k]);const [value,tone]=values[k]??pair(view==='expected'?'Not specified':'Not observed');const el=$('box-'+k),changed=$('val-'+k).textContent!==value;set('val-'+k,value);el.className='node '+tone+(animate&&changed?' changed':'')}const top=$('topology');top.classList.remove('motion');if(animate){void top.offsetWidth;top.classList.add('motion')}set('step-source',st.source);set('step-title',st.title);set('step-description',st.description);set('step-count',`${index+1} / ${list.length}`);pill('step-badge',`STEP ${index+1} OF ${list.length}`);$('scrub').max=String(list.length-1);$('scrub').value=String(index);$('prev').disabled=index===0;$('next').disabled=index===list.length-1;$('play').disabled=list.length<2;$('reset').disabled=false;$('scrub').disabled=false;evidenceFields(st);$('timeline').replaceChildren();list.forEach((entry,i)=>{const button=document.createElement('button');button.className='event'+(i===index?' current':i<index?' visited':'');button.setAttribute('aria-current',i===index?'step':'false');const cap=document.createElement('small'),name=document.createElement('b');cap.textContent=`${String(i+1).padStart(2,'0')} · ${entry.source}`;name.textContent=entry.title;button.append(cap,name);button.onclick=()=>{stop();index=i;render(true)};$('timeline').append(button)});$('timeline').querySelector('.current')?.scrollIntoView({block:'nearest',inline:'nearest',behavior:'auto'})}
+const expectedSummary={
+ overview:[['Topology','2 workers'],['Authority','1 shared SQLite'],['Evidence','Not executed']],
+ pre:[['Expected survivor','v1'],['Expected revoked device','403 / 403'],['Expected teammate','200 / 200']],
+ post:[['Expected survivor','v2'],['Expected retired v1','403 / 403'],['Expected teammate','200 / 200']],
+ revocation:[['Expected old credential','403 / 403'],['Expected teammate','200 / 200'],['Expected audit','Historical denial']],
+ approval:[['Expected expired','403'],['Expected valid','200 once'],['Expected reuse','403']],
+ competing:[['Expected commits','1'],['Expected rejected','1'],['Expected survivor','v2']],
+ backup:[['Expected original','Accepted'],['Expected modified','Rejected'],['Scope','Key backup']],
+ passport:[['Expected originals','Authenticated'],['Expected modified','Rejected'],['Expected claims','3 verified']],
+ monitor:[['Source','Worker audit'],['Expected containment','Matched denials'],['Incomplete coverage','UNAVAILABLE']],
+ detection:[['Input','Synthetic replay'],['Expected evidence','Source receipts'],['Timing','Uncertainty retained']],
+ quarantine:[['Expected stale reads','503 / 503'],['Expected retained receipt','CONFIRMED'],['Expected restored reads','200 / 403']]
 };
-
-function updateLabSpec() {
-  const scenario = byId('lab-choice').value;
-  const [pre, expected, nodes] = labSpecs[scenario];
-  byId('lab-challenge').disabled = scenario !== 'passport';
-  text('lab-preconditions', pre);
-  text('lab-expected', expected);
-  text('lab-nodes', nodes);
-  text('lab-status', 'NOT TESTED');
-  byId('lab-outcome').replaceChildren();
-}
-byId('lab-choice').addEventListener('change', updateLabSpec);
-updateLabSpec();
-
-function labRecord(title, record, container = 'lab-outcome') {
-  const details = document.createElement('details');
-  const summary = document.createElement('summary');
-  summary.textContent = title;
-  const data = document.createElement('pre');
-  data.textContent = JSON.stringify(record, null, 2);
-  details.append(summary, data);
-  byId(container).append(details);
-}
-
-byId('run-lab').addEventListener('click', async () => {
-  if (active) return;
-  const choice = byId('lab-choice');
-  const name = choice.value;
-  const challenge = name === 'passport' ? byId('lab-challenge').value : undefined;
-  choice.disabled = true;
-  byId('lab-outcome').replaceChildren();
-  try {
-    await runScenario('lab/' + name, 'lab-status', [], result => {
-      const data = result.observations;
-      if (name === 'passport') {
-        for (const node of allNodes) {
-          const {statement, modified_statement, trusted_public_key_base64, ...inputs} = data[node];
-          labRecord('Node ' + node + ' · ' + inputs.original + ' · modified copy ' + inputs.modified, inputs);
-          labRecord('Node ' + node + ' independently provisioned public key', {trusted_public_key_base64});
-          labRecord('Node ' + node + ' original signed statement', statement);
-          labRecord('Node ' + node + ' controlled modified copy', modified_statement);
-        }
-        labRecord('Independent policy appraisal across both workers', result.claims);
-        text('lab-status', result.status + ' · Historical claims and modified-copy rejection');
-      } else if (data.before) {
-        labRecord('Before · observed starting state', data.before);
-        labRecord('After · observed worker state', data.after || data.nodes);
-        const {before, after, nodes, ...remaining} = data;
-        labRecord('Supporting decisions and evidence', remaining);
-        text('lab-status', result.status + (data.active_version ? ' · Recovered v' + data.active_version : ' · Both workers observed'));
-      } else {
-        if (name === 'revocation') {
-          for (const node of allNodes) labRecord('Node ' + node + ' · HTTP ' + data[node].denial_status + ' · ' + data[node].denial_reason, data[node]);
-        } else if (name === 'quarantine') {
-          labRecord('Before verified restore · quarantined nodes', data.quarantine);
-          labRecord('After verified restore · worker outcomes', data.recovered);
-          labRecord('Retained historical receipt', data.historical);
-        } else {
-          labRecord('Backup verification · original accepted, damaged copy rejected', data);
-        }
-        text('lab-status', result.status + ' · Expected outcome observed');
-      }
-    }, challenge);
-  } finally {
-    choice.disabled = false;
-  }
-});
-
-byId('run-monitor').addEventListener('click', async () => {
-  if (active) return;
-  active = true;
-  const controls = runControls();
-  controls.forEach(button => { button.disabled = true; });
-  byId('monitor-events').replaceChildren();
-  text('monitor-status', 'Waiting for authenticated audit observations…');
-  try {
-    const response = await fetch('/run/monitor', {method: 'POST', headers: {'X-Recovery-Console': 'run'}});
-    if (!response.ok) throw new Error('Cannot start the monitor.');
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buffer = '';
-    let completed = false;
-    while (true) {
-      const {value, done} = await reader.read();
-      if (done) break;
-      buffer += value;
-      let boundary;
-      while ((boundary = buffer.indexOf('\n')) !== -1) {
-        const record = JSON.parse(buffer.slice(0, boundary));
-        buffer = buffer.slice(boundary + 1);
-        if (record.type === 'complete') {
-          completed = true;
-          text('monitor-status', record.status + (record.error ? ' · ' + record.error : ' · Monitored fixtures complete'));
-          if (record.report) labRecord('Final findings, containment and poll measurements', record.report, 'monitor-events');
-        } else if (record.type === 'fixture_started') {
-          text('monitor-status', 'Observing the ' + record.fixture + ' fixture…');
-        } else {
-          const title = record.type === 'finding' ? record.node + ' · ' + record.reason :
-            record.type === 'containment' ? record.node + ' · Denial and withheld body confirmed' :
-            record.type === 'administrative_response' ? 'Scripted operator response · ' + record.action :
-            record.rule.replaceAll('_', ' ');
-          labRecord(record.fixture + ' · ' + title, record, 'monitor-events');
-        }
-      }
-    }
-    if (!completed) throw new Error('The monitor ended before reporting completion.');
-  } catch (error) {
-    text('monitor-status', 'UNAVAILABLE · ' + error.message);
-  } finally {
-    controls.forEach(button => { button.disabled = false; });
-    active = false;
-  }
-});
+function setView(next){stop();view=next;index=0;$('expected').setAttribute('aria-pressed',String(view==='expected'));$('observed').setAttribute('aria-pressed',String(view==='observed'));$('run-wrap').hidden=view!=='observed'||report===null;set('report',report===null?'':JSON.stringify(report,null,2));set('trail-title',view==='expected'?'Expected sequence':'Returned observation trail');set('trail-note',view==='expected'?'Illustration, not measurement':selected==='monitor'?'Actual streamed fixture observations':'Replay of completed observations, not live traffic');if(view==='expected'){pill('mode-pill','EXPECTED · NOT TESTED');metrics(expectedSummary[selected]);}else{pill('mode-pill',busy?'RUNNING · OBSERVED':outcome, outcome==='PASS'?'good':outcome==='FAIL'?'deny':'warn');updateMetrics()}render()}
+function updateMetrics(){if(!report){metrics([['Backend',busy?'Running':'Not completed'],['Outcome',outcome],['Evidence',`${observed.length} records`]]);return}const r=report,d=r.observations??r;if(selected==='pre'||selected==='post'){metrics([['Surviving version',`v${r.active_version}`,'good'],['Recovery (Node A)',`${r.recovery_ms} ms`],['Last-node denial',`${r.last_denial_ms} ms`]]);}else if(selected==='approval'||selected==='competing'){metrics([['Rotation accepted',String(d.outcomes.filter(x=>x.status===200).length)],['Rotation rejected',String(d.outcomes.filter(x=>x.status===403).length)],['Outcome',outcome,outcome==='PASS'?'good':'warn']]);}else if(selected==='quarantine'){metrics([['Stale HTTP status',nodes.map(n=>d.quarantine[n].status).join(' / ')],['Restoration',`${d.recovery_ms} ms`],['Outcome',outcome,outcome==='PASS'?'good':'warn']]);}else if(selected==='detection'){metrics([['Findings',String(d.findings.length)],['Timing notes',String(d.timing_notes.length)],['Median ingestion',`${d.source_ingestion.median_ms} ms`]]);}else if(selected==='passport'){metrics([['Originals',nodes.map(n=>d[n].original==='STATEMENT AUTHENTICATED'?'✓':'?').join(' / ')],['Modified copies',nodes.map(n=>d[n].modified).join(' / ')],['Claims verified',String(Object.values(r.claims??{}).filter(x=>x==='VERIFIED').length)]]);}else if(selected==='backup'){metrics([['Original backup',d.intact_accepted?'Accepted':'Not accepted'],['Damaged backup',d.damaged_accepted?'Accepted':'Rejected'],['Version',`v${d.version}`]]);}else if(selected==='revocation'){metrics([['Revoked device A / B',nodes.map(n=>d[n].denial_status).join(' / ')],['Teammate A / B',nodes.map(n=>d[n].teammate_status).join(' / ')],['Outcome',outcome,outcome==='PASS'?'good':'warn']]);}else{const rows=Object.values(r);metrics([['Findings',String(rows.reduce((a,x)=>a+(x.findings?.length??0),0))],['Confirmed denials',String(rows.reduce((a,x)=>a+(x.findings??[]).filter(f=>f.containment==='CONFIRMED_DENIAL_NO_BODY').length,0))],['Outcome',outcome,outcome==='PASS'?'good':'warn']])}}
+function selectScenario(id){if(busy)return;selected=id;const saved=sessionRuns.get(id);observed=saved?.observed??[];report=saved?.report??null;outcome=saved?.outcome??'NOT TESTED';for(const button of $('scenario-list').children){button.classList.toggle('selected',button.dataset.id===id);button.setAttribute('aria-pressed',String(button.dataset.id===id))}const c=catalog[id];set('title',c.title);set('subtitle',c.description);set('category',c.category);set('diagram-title',id==='detection'?'Source-to-finding flow':id==='passport'?'Statement verification flow':id==='backup'?'Backup verification flow':'System topology');$('prediction-wrap').hidden=!c.predict;$('prediction').value=id==='post'?'2':'1';$('challenge-wrap').hidden=!c.challenge;$('challenge-wrap').open=false;$('challenge').value='';$('run').disabled=!c.route;$('observed').disabled=observed.length===0;set('run-status',saved?'Previous run retained in this session. Open Observed replay or run a fresh fixture.':c.route?'Preview the expected flow, or run the real local fixture.':'Select a scenario to run. Explore without executing anything.');setView('expected')}
+function resultStep(title,description,patch,evidence,source='RETURNED RECORD'){return step(title,description,patch,evidence,source)}
+const need=(test,msg)=>{if(!test)throw new Error('Incomplete or inconsistent response: '+msg)};
+const httpTone=status=>status===200?'good':status===401||status===403?'deny':status===503?'warn':'neutral';
+const http=status=>pair(`HTTP ${status}`,httpTone(status));
+function recoverySteps(r){need(Array.isArray(r.timeline)&&Array.isArray(r.evidence)&&r.nodes&&[1,2].includes(r.active_version),'recovery schema');need(r.active_version===(selected==='pre'?1:2)&&r.audit_verified===true&&Number.isFinite(r.recovery_ms)&&Number.isFinite(r.last_denial_ms)&&r.before?.status===200&&r.before?.version===1,'surviving version, initial read, measurements or audit');const audit=new Map(r.evidence.map(x=>[x.request_id,x]));const list=[resultStep('Initial fixture read','The harness returned the observed starting version and status.',{db:pair('Starting v'+r.before.version),b:http(r.before.status)},r.before,'HARNESS')];for(const e of r.timeline){const matching=audit.get(e.request_id);const p={},label=e.label, n=String(e.source).toLowerCase();let d='Recorded observation from the completed recovery fixture.';if(label==='Device revoked'){p.owner=deny('Revocation recorded');p.witness=pair('Revocation checkpoint');d='The revocation operation committed before the worker interruption.'}else if(label==='Revoked device denied'){p[n]=deny('Revoked credential denied');p.owner=deny('Explicit denial');d='The harness observed the credential denial on this worker.'}else if(label.includes('rotation preparation')){p.a=warn('Preparing rotation');p.b=ok(`${e.reads} verified v${e.version} reads`);p.db=pair('Committed v1');d='Reads were verified while preparation was paused.'}else if(label==='Old key version rejected'){p[n]=deny('v1 rejected');p.db=pair('Committed v2');d='This post-commit probe observed rejection of the old version before the rotation reply.'}else if(label.includes('after commit before rotation reply')){p.b=ok(`${e.reads} verified v${e.version} reads`);p.db=ok('Committed v2');d='The surviving worker served v2 before the interrupted reply.'}else if(label.startsWith('Reached ')){p.a=warn(label.includes('pre-')?'Pre-commit checkpoint':'Post-commit checkpoint');d='Harness checkpoint, not a signed statement.'}else if(label==='Node A killed'){p.a=pair('Process terminated');d='The harness observed actual process termination. This is not HTTP denial.'}else if(label==='Teammate read verified'){p[n]=ok(`Teammate v${e.version} verified`);p.peer=ok('Authorized exact content');p.db=ok('Committed v'+e.version);d='A successful read with verified file contents after recovery.'}else if(label==='Revocation survived restart'){p[n]=ok('Recovered; owner denied');p.owner=deny('Revoked device denied')}else if(label.includes('authenticated')){p.audit=ok('Statement authenticated');d='The harness verified the challenge-bound signature on a historical worker decision.'}else if(label==='Rotation committed'){p.audit=ok('Durable rotation record');d='The durable audit was checked after recovery; this is not the wall-clock commit time.'}else if(label==='Damaged key backup rejected'){p.audit=ok('Backup check recorded')}list.push(resultStep(label,d,p,matching?{observation:e,audit_event:matching}:e,matching?'AUDIT + HARNESS':'HARNESS'))}for(const n of nodes){const x=r.nodes[n];need(x.health===200&&x.teammate_status===200&&x.revoked_status===403&&x.revoked_reason==='revoked_device'&&(selected!=='post'||x.old_version_status===403),'node '+n+' invariants');list.push(resultStep('Worker '+n+' final authorization','Compare the final teammate read and revoked-device denial. Signed historical decisions are included.',{[n.toLowerCase()]:ok('Teammate 200 / owner 403'),owner:deny('Revoked device 403'),peer:ok('Exact file verified'),db:ok('v'+r.active_version+' active')},x,'HARNESS + SIGNED'))}list.push(resultStep('Authenticated audit history','The harness verified the audit chain. Prediction does not control the surviving version.',{audit:ok('Audit verified')},{audit_verified:r.audit_verified,active_version:r.active_version,predicted_version:Number($('prediction').value),records:r.evidence,backup:r.backup},'HARNESS + AUDIT'));return list}
+function labSteps(id,r){const d=r.observations;need(r.status==='PASS'&&d,'lab result');const list=[];if(id==='approval'||id==='competing'){need(Array.isArray(d.before)&&Array.isArray(d.after)&&Array.isArray(d.outcomes)&&Array.isArray(d.evidence),'approval data');need(d.before.length===2&&d.before.every(x=>x.status===200)&&d.after.length===4&&d.after.every(x=>x.status===(x.requested_version===2?200:403)),'read continuity');need(d.outcomes.filter(x=>x.status===200).length===1,'one successful rotation');if(id==='approval')need(d.outcomes.map(x=>x.reason).join(',')==='approval_expired,version_rotated,approval_missing','approval decisions');else need(d.outcomes.length===2&&d.outcomes.some(x=>x.status===403&&x.reason==='wrong_version'),'competing rotation');for(const x of d.before)list.push(resultStep(`Worker ${x.node} starts at v${x.requested_version}`,'Observed initial read, with exact content checked by the harness.',{db:pair('Committed v1'),[x.node.toLowerCase()]:http(x.status)},x,'HARNESS'));for(const x of d.outcomes){const a=d.evidence.find(e=>e.request_id===x.request_id);need(a,'rotation audit binding');list.push(resultStep(`Worker ${x.node}: ${human(x.reason)}`,'Returned rotation decision and matching authenticated audit record.',{operator:pair(human(x.reason),httpTone(x.status)),[x.node.toLowerCase()]:http(x.status),...(x.status===200?{db:ok('Committed v2')}:{})},{response:x,audit_event:a},'AUDIT + HARNESS'))}for(const x of d.after)list.push(resultStep(`Worker ${x.node}: v${x.requested_version} → ${x.status}`,'Observed read after the successful rotation.',{[x.node.toLowerCase()]:http(x.status),db:ok('Committed v2')},x,'HARNESS'));list.push(resultStep('Both workers checked','Exact contents were verified on successful reads; denied responses withheld protected fields.',{a:ok('v2 allowed / v1 denied'),b:ok('v2 allowed / v1 denied'),audit:ok('Rotation decisions verified')},d,'HARNESS + AUDIT'))}else if(id==='revocation'){for(const n of nodes){const x=d[n];need(x?.denial_status===403&&x.denial_reason==='revoked_device'&&x.teammate_status===200,'revocation '+n);list.push(resultStep(`Worker ${n}: revoked device denied`,'The post-commit fixture returned the explicit denial and allowed teammate result, with a historical signed decision.',{owner:deny('Revoked device 403'),peer:ok('Teammate 200'),[n.toLowerCase()]:ok('Denial + access verified'),audit:pair('Signed revocation evidence')},x,'HARNESS + SIGNED'))}}else if(id==='backup'){need(d.intact_accepted===true&&d.damaged_accepted===false&&Array.isArray(d.audit_records)&&d.audit_records.some(x=>x.reason==='verified_backup')&&d.audit_records.some(x=>x.reason==='rejected_backup'),'backup decisions');list.push(resultStep('Original key backup accepted','The intact backup passed active asset/version verification.',{owner:ok('Original accepted'),a:ok('Verification succeeded'),db:pair('Active v'+d.version)},d.audit_records.find(x=>x.reason==='verified_backup')??d,'AUDIT + HARNESS'));list.push(resultStep('Modified backup rejected','The one-byte-modified copy failed verification. The original ciphertext remains eligible.',{owner:deny('Damaged copy rejected'),a:ok('Rejection verified'),audit:ok('Both decisions recorded')},d,'AUDIT + HARNESS'))}else if(id==='passport'){for(const n of nodes){const x=d[n];need(x?.original==='STATEMENT AUTHENTICATED'&&x.modified==='REJECTED','passport '+n);list.push(resultStep(`Signer ${n}: original authenticated`,'The verifier used the separately provisioned public key and expected bindings.',{[n.toLowerCase()]:ok('Original authenticated'),operator:pair('Harness-provisioned pin'),peer:pair('Challenge bound')},x,'SIGNED + VERIFIER'));list.push(resultStep(`Signer ${n}: changed copy rejected`,'The original signature does not authenticate the changed signed bytes.',{owner:deny('Modified copy rejected'),audit:pair('Negative verification')},{modified:x.modified,modified_statement:x.modified_statement},'VERIFIER'))}need(['revoked-device','teammate-read','retired-version'].every(k=>r.claims?.[k]==='VERIFIED'),'three historical claims');list.push(resultStep('Historical claims appraised','All three claims satisfy the expected historical statement policies. This does not prove current state.',{db:ok('3 historical claims verified'),witness:pair('Current state not proven'),audit:ok('Claim appraisal complete')},r.claims,'VERIFIER'))}return list}
+function archiveSteps(r){need(r.quarantine&&r.recovered&&r.historical?.lifecycle==='CONFIRMED','archive receipt');const list=[];for(const n of nodes){const x=r.quarantine[n];need(x.status===503,'stale node '+n);list.push(resultStep(`Worker ${n}: stale state unavailable`,'The worker withheld access because the snapshot could not be verified. HTTP 503 is not explicit revocation denial.',{[n.toLowerCase()]:warn('503 / quarantined'),db:warn('Stale snapshot')},x,'HARNESS'))}list.push(resultStep('Historical receipt survives','The independent investigator retrieved the retained record during quarantine.',{operator:pair('Investigator retrieval'),audit:ok('CONFIRMED receipt')},r.historical,'ARCHIVE RECEIPT'));for(const n of nodes){const x=r.recovered[n];need(x.teammate.status===200&&x.revoked.status===403&&x.revoked.reason==='revoked_device','restore '+n);list.push(resultStep(`Worker ${n}: eligible state restored`,'The verified current snapshot preserves teammate access and revocation.',{[n.toLowerCase()]:ok('Teammate 200 / revoked 403'),db:ok('Eligible snapshot'),owner:deny('Revoked 403'),peer:ok('Teammate 200')},x,'HARNESS'))}return list}
+function detectorSteps(r){need(Array.isArray(r.findings)&&Array.isArray(r.timing_notes)&&Array.isArray(r.sources)&&r.source_receipts,'detector result');const source=new Map(r.sources.map(x=>[x.event_id,x]));const list=r.findings.map(f=>{const e=f.event;need(f.receipt.state==='CONFIRMED'&&e.source_ids.every(x=>{const s=r.source_receipts[x.event_id];return s?.state==='CONFIRMED'&&s.producer===x.producer&&s.sequence<f.receipt.sequence}),'receipt binding');return resultStep(human(e.rule_id),f.explanation,{owner:pair(e.actor),a:pair(`${e.source_ids.length} retained sources`),b:warn(human(e.detector_context.classification)),db:pair(`±${f.uncertainty_ms??'unknown'} ms`),witness:ok('Source receipts confirmed'),audit:ok('Alert receipt confirmed')},{...f,sources:e.source_ids.map(x=>({observation:source.get(x.event_id),receipt:r.source_receipts[x.event_id]}))},'ARCHIVE RECEIPT')});for(const n of r.timing_notes)list.push(resultStep(human(n.reason),'Timing note from the finite synthetic replay; not proof of event ordering.',{b:warn('Timing uncertainty'),db:warn(human(n.reason))},{note:n,observation:source.get(n.event)},'DETECTOR NOTE'));if(!list.length)list.push(resultStep('No findings returned','This finite replay returned no findings or timing notes. This does not prove absence of threats.',{b:pair('No findings returned')},r,'REPLAY REPORT'));return list}
+function monitorStep(e){const p={};let title,d;if(e.type==='fixture_started'){title='Fixture: '+e.fixture;d='The backend began a separate controlled fixture.';for(const k of keys)p[k]=pair('Not observed in this fixture')}else if(e.type==='finding'){title=`${e.node} · ${human(e.reason)}`;d=e.explanation;p[String(e.node).toLowerCase()]=deny(human(e.reason));p.audit=pair('Authenticated finding');p.owner=pair(e.actor??'Credential reference')}else if(e.type==='containment'){title=`${e.node} · Denial correlated`;d='The monitor matched a denied HTTP response that withheld protected fields.';p[String(e.node).toLowerCase()]=ok('Denial contained');p.audit=ok(e.containment)}else if(e.type==='administrative_response'){title='Scripted operator: '+e.action;d='Explicit administrative action in the fixture, not automatic monitor response.';p.operator=pair('Scripted action')}else{title=human(e.rule??e.type);d=e.explanation??'Monitor status observation.';p.audit=warn('Coverage / evidence status')}return resultStep(title,d,p,e,e.type==='finding'?'AUTHENTICATED AUDIT':'MONITOR')}
+async function monitor(response){need(response.body,'missing stream');const reader=response.body.pipeThrough(new TextDecoderStream()).getReader();let buffer='',complete=false;while(true){const {value,done}=await reader.read();if(done)break;buffer+=value;let i;while((i=buffer.indexOf('\n'))!==-1){const line=buffer.slice(0,i);buffer=buffer.slice(i+1);if(!line)continue;const e=JSON.parse(line);if(e.type==='complete'){need(!complete,'duplicate terminal record');complete=true;need(['PASS','FAIL','UNAVAILABLE'].includes(e.status),'monitor status');outcome=e.status;report=e.report??null;observed.push(resultStep('Monitor finished: '+e.status,e.error??'The backend reported its final coverage and containment results.',{audit:pair(e.status,e.status==='PASS'?'good':e.status==='FAIL'?'deny':'warn')},e,'MONITOR REPORT'))}else{need(!complete,'event after completion');observed.push(monitorStep(e))}if(view==='observed'){index=observed.length-1;render(true);updateMetrics()}}}need(complete&&!buffer.trim(),'stream ended without complete report');if(outcome==='PASS')need(report&&Object.keys(report).length===2&&Object.values(report).every(x=>x.findings?.length&&x.status_events?.length===0&&x.findings.every(f=>f.containment==='CONFIRMED_DENIAL_NO_BODY')),'monitor completeness')}
+function toggleBusy(flag){busy=flag;document.body.classList.toggle('running',flag);for(const b of $('scenario-list').children)b.disabled=flag;$('run').disabled=flag||!catalog[selected].route;$('prediction').disabled=flag;$('challenge').disabled=flag;$('expected').disabled=flag}
+async function run(){if(busy||!catalog[selected].route)return;const challenge=catalog[selected].challenge?$('challenge').value:'';if(challenge&&!/^[0-9a-f]{64}$/.test(challenge)){setView('expected');set('run-status','NOT TESTED · Enter exactly 64 lowercase hexadecimal digits or leave blank. Prior replay, if any, remains separate.');return}stop();sessionRuns.delete(selected);observed=[];report=null;outcome='RUNNING';toggleBusy(true);$('observed').disabled=false;setView('observed');set('run-status','Executing the actual local backend. Waiting for returned observations…');try{const response=await fetch('/run/'+catalog[selected].route,{method:'POST',headers:{'X-Recovery-Console':'run',...(challenge?{'X-Verification-Challenge':challenge}:{})}});if(!response.ok){const err=await response.json();outcome=err.verification_failed===true?'FAIL':response.status===400?'NOT TESTED':'UNAVAILABLE';throw new Error(err.error??'Backend request failed')}if(selected==='monitor'){await monitor(response)}else{const r=await response.json();let steps;if(selected==='pre'||selected==='post')steps=recoverySteps(r);else if(selected==='quarantine')steps=archiveSteps(r);else if(selected==='detection')steps=detectorSteps(r);else steps=labSteps(selected,r);need(steps.length>0,'no observations');report=r;observed=steps;outcome=selected==='detection'?'REPLAY COMPLETE':'PASS'}set('run-status',outcome+(selected==='pre'||selected==='post'?` · Prediction ${Number($('prediction').value)===report.active_version?'matched':'differed'}; actual v${report.active_version}.`:' · Returned backend observations. Use playback to explain them.'));}catch(e){if(outcome==='RUNNING'||outcome==='PASS')outcome='UNAVAILABLE';report=null;set('run-status',outcome+' · '+e.message);observed.push(resultStep('Execution incomplete','No successful overall result is asserted.',{audit:warn('No verified completion')},{error:e.message},'UI STATUS'))}finally{sessionRuns.set(selected,{observed,report,outcome});toggleBusy(false);setView('observed');if(selected==='monitor'){index=Math.max(0,observed.length-1);render()} }}
+Object.entries(catalog).forEach(([id,c],i)=>{const b=document.createElement('button');b.className='scenario';b.dataset.id=id;const index=document.createElement('span');index.className='index';index.textContent=i===0?'⌂':String(i).padStart(2,'0');const box=document.createElement('span'),name=document.createElement('b'),sub=document.createElement('small');name.textContent=c.name;sub.textContent=c.sub;box.append(name,sub);b.append(index,box);b.onclick=()=>selectScenario(id);$('scenario-list').append(b)});
+$('run').onclick=run;$('expected').onclick=()=>setView('expected');$('observed').onclick=()=>setView('observed');$('prev').onclick=()=>{stop();index--;render(true)};$('next').onclick=()=>{stop();index++;render(true)};$('reset').onclick=()=>{stop();index=0;render()};$('scrub').oninput=()=>{stop();index=Number($('scrub').value);render()};$('play').onclick=()=>{if(timer){stop();return}if(index===current().length-1){index=0;render()}set('play','Ⅱ Pause');timer=setInterval(()=>{if(index>=current().length-1){stop();return}index++;render(true)},2200)};document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA','BUTTON','SUMMARY'].includes(e.target.tagName))return;if(e.key==='ArrowRight'||e.key==='ArrowLeft'){stop();index+=e.key==='ArrowRight'?1:-1;render(true)}});selectScenario('overview');
